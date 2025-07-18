@@ -1,99 +1,51 @@
 ﻿using System;
 using WebSocketSharp;
 using WebSocketSharp.Server;
+using System.Net.Http;
+using System.Text.Json;
 
-public class MoonshareBehavior : WebSocketBehavior
+public class PlayerBehavior : WebSocketBehavior
 {
-    protected override void OnOpen()
-    {
-        try
-        {
-            Console.WriteLine($"Client connected: {ID}");
-            var registerMsg = $"{{\"type\":\"register\", \"userId\":\"{ID}\"}}";
-            Send(registerMsg);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[OnOpen] Fehler: {ex}");
-        }
-    }
+    private string _userId;
 
     protected override void OnMessage(MessageEventArgs e)
     {
-        try
-        {
-            Console.WriteLine($"Received from {ID}: {e.Data}");
+        var message = e.Data;
 
-            // Hier kannst du Message-Parsing und Weiterleitung einbauen
-            // Beispiel: Echo zurück zum Client
-            var response = $"{{\"type\":\"message\", \"fromUserId\":\"{ID}\", \"payload\":\"{EscapeJson(e.Data)}\"}}";
-            Send(response);
-        }
-        catch (Exception ex)
+        if (message.StartsWith("SESSION:"))
         {
-            Console.WriteLine($"[OnMessage] Fehler bei Nachricht von {ID}: {ex}");
-        }
-    }
+            var token = message.Substring(8);
 
-    protected override void OnClose(CloseEventArgs e)
-    {
-        try
+            if (SessionManager.ValidateSession(token, out var session))
+            {
+                _userId = session.UserId;
+                Send($"SESSION_OK:{_userId}");
+                Console.WriteLine($"[PlayerServer] {_userId} verbunden mit gültiger Session");
+            }
+            else
+            {
+                Send("SESSION_INVALID");
+                Context.WebSocket.Close();
+            }
+        }
+        else
         {
-            Console.WriteLine($"Client {ID} disconnected: {e.Reason} (Code: {e.Code})");
+            Console.WriteLine($"[PlayerServer] {_userId}: {message}");
+            Send($"ECHO ({_userId}): {message}");
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[OnClose] Fehler: {ex}");
-        }
-    }
-
-    protected override void OnError(WebSocketSharp.ErrorEventArgs e)
-    {
-        Console.WriteLine($"[OnError] Fehler bei Client {ID}: {e.Message}");
-    }
-
-    // Hilfsmethode um JSON-Inhalt sicher zu escapen
-    private static string EscapeJson(string str)
-    {
-        return str.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
     }
 }
 
-class Program
+class PlayerServer
 {
     static void Main()
     {
-        var wssv = new WebSocketServer("ws://localhost:5000");
+        var wssv = new WebSocketServer("ws://localhost:5002");
+        wssv.AddWebSocketService<PlayerBehavior>("/player");
+        wssv.Start();
 
-        wssv.AddWebSocketService<MoonshareBehavior>("/ws");
-
-        try
-        {
-            wssv.Start();
-            Console.WriteLine("Moonshare WebSocket Server läuft auf ws://localhost:5000/ws");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[Server] Fehler beim Starten: {ex}");
-        }
-
-        // Hauptloop, damit Server nicht sofort schließt
-        Console.WriteLine("Drücke ENTER zum Beenden...");
-        while (true)
-        {
-            var input = Console.ReadLine();
-            if (input != null && input.Trim().Equals("exit", StringComparison.OrdinalIgnoreCase))
-                break;
-        }
-
-        try
-        {
-            wssv.Stop();
-            Console.WriteLine("Server gestoppt.");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[Server] Fehler beim Stoppen: {ex}");
-        }
+        Console.WriteLine("🎮 PlayerServer läuft auf ws://localhost:5002/player");
+        Console.ReadLine();
+        wssv.Stop();
     }
 }

@@ -1,9 +1,11 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
-VisualStudioVersion = 17.14.36212.18 d17.14
+VisualStudioVersion = 17.14.36212.18
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Moonshare Server", "Moonshare Server\Moonshare Server.csproj", "{DA336F1C-479E-46E9-AC83-C5F1331628E5}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PlayerServer", "Moonshare Server\PlayerServer.csproj", "{DA336F1C-479E-46E9-AC83-C5F1331628E5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AuthServer", "AuthServer\AuthServer.csproj", "{CDE0D9AD-67F6-4E5B-8589-A639684EE3C6}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -15,6 +17,10 @@ Global
 		{DA336F1C-479E-46E9-AC83-C5F1331628E5}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{DA336F1C-479E-46E9-AC83-C5F1331628E5}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{DA336F1C-479E-46E9-AC83-C5F1331628E5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CDE0D9AD-67F6-4E5B-8589-A639684EE3C6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CDE0D9AD-67F6-4E5B-8589-A639684EE3C6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CDE0D9AD-67F6-4E5B-8589-A639684EE3C6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CDE0D9AD-67F6-4E5B-8589-A639684EE3C6}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
