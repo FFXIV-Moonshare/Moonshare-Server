@@ -1,242 +1,178 @@
 ﻿using System;
-using System.Net.Http;
-using System.Net.WebSockets;
+using System.Collections.Concurrent;
+using System.Linq;
+using System.Net;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
 using System.Threading.Tasks;
 using WebSocketSharp;
 using WebSocketSharp.Server;
 
-namespace Moonshare_Plugin
+public class AuthSession
 {
-    public class UserSessionManager : IDisposable
+    public string UserId { get; set; } = string.Empty;
+    public string SessionToken { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+}
+
+public static class SessionManager
+{
+    public static ConcurrentDictionary<string, AuthSession> Sessions = new();
+
+    public static string GenerateSession(string userId)
     {
-        private ClientWebSocket? playerSocket;
-        private CancellationTokenSource? cts;
+        var existing = Sessions.Values.FirstOrDefault(s => s.UserId == userId);
+        if (existing != null)
+            return existing.SessionToken;
 
-        public string? LocalUserId { get; private set; }
-        public string? SessionToken { get; private set; }
-        public string? ConnectedToUserId { get; private set; }
-
-        public bool IsConnected => playerSocket?.State == System.Net.WebSockets.WebSocketState.Open;
-
-        public async Task InitializeAsync()
+        string token = Guid.NewGuid().ToString("N");
+        Sessions[token] = new AuthSession
         {
-            try
-            {
-                string userId = "moonshare_user"; // Oder aus Config laden
+            UserId = userId,
+            SessionToken = token,
+            CreatedAt = DateTime.UtcNow
+        };
+        Console.WriteLine($"[AuthServer] Session created for {userId} with token {token}");
+        return token;
+    }
 
-                // 1) Authentifiziere via HTTP und hole Token vom AuthServer
-                var authToken = await GetAuthTokenFromHttpAsync(userId);
-                if (authToken == null)
-                {
-                    Console.WriteLine("❌ Authentifizierung fehlgeschlagen. Kein Token erhalten.");
-                    return;
-                }
+    public static AuthSession[] GetAllSessions() => Sessions.Values.ToArray();
 
-                LocalUserId = userId;
-                SessionToken = authToken;
-                Console.WriteLine($"✅ Authentifiziert als {userId} mit Token: {authToken}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Fehler bei Authentifizierung: {ex}");
-                return;
-            }
+    public static bool ValidateSession(string token, out AuthSession? session)
+        => Sessions.TryGetValue(token, out session!);
 
-            // 2) Verbinde dich mit PlayerServer
-            cts?.Cancel();
-            cts = new CancellationTokenSource();
-            playerSocket?.Dispose();
-            playerSocket = new ClientWebSocket();
+    public static string GetSessionsJson()
+        => JsonSerializer.Serialize(Sessions.Values);
 
-            try
-            {
-                var playerUri = new Uri("ws://localhost:5002/player");
-                Console.WriteLine("🌐 Starte Verbindung zum PlayerServer...");
-                await playerSocket.ConnectAsync(playerUri, cts.Token);
-                Console.WriteLine("✅ Verbunden mit PlayerServer.");
+    public static void CleanupExpiredSessions(TimeSpan maxAge)
+    {
+        var expiredTokens = Sessions
+            .Where(kvp => DateTime.UtcNow - kvp.Value.CreatedAt > maxAge)
+            .Select(kvp => kvp.Key)
+            .ToList();
 
-                // 3) Sende Session-Token an PlayerServer
-                string authMsg = "SESSION:" + SessionToken;
-                var authBytes = Encoding.UTF8.GetBytes(authMsg);
-                await playerSocket.SendAsync(authBytes, WebSocketMessageType.Text, true, cts.Token);
-
-                // 4) Starte den ReceiveLoop im Hintergrund
-                _ = Task.Run(() => ReceiveLoop(cts.Token), cts.Token);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Verbindung zum PlayerServer fehlgeschlagen: {ex}");
-                playerSocket.Dispose();
-                playerSocket = null;
-                cts.Cancel();
-            }
+        foreach (var token in expiredTokens)
+        {
+            Sessions.TryRemove(token, out _);
+            Console.WriteLine($"[AuthServer] Session {token} expired and removed.");
         }
+    }
+}
 
-        // ✅ Neue Authentifizierungsmethode via HTTP
-        private async Task<string?> GetAuthTokenFromHttpAsync(string userId)
+public class AuthBehavior : WebSocketBehavior
+{
+    protected override void OnMessage(MessageEventArgs e)
+    {
+        var userId = e.Data.Trim();
+        if (string.IsNullOrWhiteSpace(userId))
         {
-            try
-            {
-                using var httpClient = new HttpClient();
-                var response = await httpClient.GetAsync($"http://localhost:5003/sessions?userId={userId}");
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"❌ AuthServer HTTP-Fehler: {response.StatusCode}");
-                    return null;
-                }
-
-                var json = await response.Content.ReadAsStringAsync();
-                using var doc = JsonDocument.Parse(json);
-                if (doc.RootElement.TryGetProperty("token", out var tokenElement))
-                {
-                    return tokenElement.GetString();
-                }
-
-                Console.WriteLine("❌ Kein 'token'-Feld in Antwort.");
-                return null;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Fehler bei HTTP-Request an AuthServer: {ex}");
-                return null;
-            }
+            Send("AUTH_FAIL:EmptyUserId");
+            Context.WebSocket.Close();
+            return;
         }
+        var token = SessionManager.GenerateSession(userId);
+        Send($"AUTH_SUCCESS:{token}");
+        Console.WriteLine($"[AuthServer] Authenticated user '{userId}' with token '{token}'");
+    }
+}
 
-        private async Task ReceiveLoop(CancellationToken token)
+public class SessionQueryBehavior : WebSocketBehavior
+{
+    protected override void OnMessage(MessageEventArgs e)
+    {
+        if (e.Data == "GET_SESSIONS")
         {
-            var buffer = new byte[4096];
+            var json = SessionManager.GetSessionsJson();
+            Send(json);
+            Console.WriteLine("[AuthServer] Sessions sent via WebSocket");
+        }
+        else
+        {
+            Send("ERROR:UnknownCommand");
+        }
+    }
+}
 
-            try
+class Program
+{
+    static HttpListener? httpListener;
+
+    static async Task Main()
+    {
+        var wssv = new WebSocketServer("ws://localhost:5004"); // WebSocket port 5004
+        wssv.AddWebSocketService<AuthBehavior>("/auth");
+        wssv.AddWebSocketService<SessionQueryBehavior>("/sessions");
+        wssv.Start();
+        Console.WriteLine("✅ WebSocket AuthServer läuft auf ws://localhost:5004/auth und /sessions");
+
+        httpListener = new HttpListener();
+        httpListener.Prefixes.Add("http://localhost:5003/sessions/");
+        httpListener.Start();
+        Console.WriteLine("✅ HTTP AuthServer läuft auf http://localhost:5003/sessions/");
+
+        var cleanupTimer = new System.Timers.Timer(60000);
+        cleanupTimer.Elapsed += (_, _) => SessionManager.CleanupExpiredSessions(TimeSpan.FromMinutes(10));
+        cleanupTimer.Start();
+
+        var httpTask = Task.Run(async () =>
+        {
+            while (httpListener.IsListening)
             {
-                while (playerSocket?.State == System.Net.WebSockets.WebSocketState.Open && !token.IsCancellationRequested)
+                try
                 {
-                    var result = await playerSocket.ReceiveAsync(buffer, token);
-
-                    if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        Console.WriteLine("❌ Server hat Verbindung geschlossen.");
-                        await playerSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Bye", CancellationToken.None);
-                        break;
-                    }
-
-                    var msg = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    Console.WriteLine($"⬇️ Empfangen vom PlayerServer: {msg}");
-
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(msg);
-                        var root = doc.RootElement;
-
-                        if (root.TryGetProperty("type", out var typeElem))
-                        {
-                            var type = typeElem.GetString();
-
-                            switch (type)
-                            {
-                                case "message":
-                                    var fromId = root.GetProperty("fromUserId").GetString();
-                                    var payload = root.GetProperty("payload").GetString();
-                                    Console.WriteLine($"📩 Nachricht von {fromId}: {payload}");
-                                    break;
-
-                                case "register":
-                                    var registeredUserId = root.GetProperty("userId").GetString();
-                                    Console.WriteLine($"✅ Spieler registriert: {registeredUserId}");
-                                    break;
-                            }
-                        }
-                    }
-                    catch (Exception e)
-                    {
-                        Console.WriteLine($"⚠️ Fehler beim Parsen der Nachricht: {e}");
-                    }
+                    var ctx = await httpListener.GetContextAsync();
+                    ProcessHttpRequest(ctx);
+                }
+                catch (HttpListenerException) { break; }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[HTTP] Fehler: {ex}");
                 }
             }
-            catch (OperationCanceledException)
-            {
-                Console.WriteLine("ℹ️ ReceiveLoop wurde abgebrochen.");
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine($"❌ Fehler im ReceiveLoop: {e}");
-            }
-            finally
-            {
-                Console.WriteLine("🔌 ReceiveLoop beendet.");
-            }
-        }
+        });
 
-        public async Task ConnectToAsync(string otherUserId)
+        Console.WriteLine("Drücke Enter zum Stoppen...");
+        Console.ReadLine();
+
+        httpListener.Stop();
+        wssv.Stop();
+    }
+
+    private static void ProcessHttpRequest(HttpListenerContext ctx)
+    {
+        var req = ctx.Request;
+        var res = ctx.Response;
+
+        if (req.HttpMethod != "GET")
         {
-            if (!IsConnected)
-            {
-                Console.WriteLine("⚠️ Nicht mit PlayerServer verbunden.");
-                return;
-            }
-
-            var msg = new { type = "connect", targetUserId = otherUserId };
-            var json = JsonSerializer.Serialize(msg);
-            var bytes = Encoding.UTF8.GetBytes(json);
-
-            try
-            {
-                await playerSocket!.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
-                ConnectedToUserId = otherUserId;
-                Console.WriteLine($"🔗 Verbindung zu {otherUserId} wird versucht...");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Fehler beim Senden der Verbindungsnachricht: {ex}");
-            }
+            res.StatusCode = 405;
+            res.Close();
+            return;
         }
 
-        public class SessionQueryBehavior : WebSocketBehavior
+        var query = req.QueryString;
+        var userId = query["userId"];
+
+        if (string.IsNullOrWhiteSpace(userId))
         {
-            protected override void OnMessage(MessageEventArgs e)
-            {
-                if (e.Data == "GET_SESSIONS")
-                {
-                    var allSessions = SessionManager.GetAllSessions(); // Diese Methode muss im SessionManager vorhanden sein.
-                    var json = JsonSerializer.Serialize(allSessions);
-                    Send(json);
-                    Console.WriteLine($"[AuthServer] Sessiondaten an PlayerServer gesendet: {allSessions.Length} Sessions");
-                }
-                else
-                {
-                    Send("UNKNOWN_COMMAND");
-                    Context.WebSocket.Close();
-                }
-            }
+            res.StatusCode = 400;
+            var errorBytes = Encoding.UTF8.GetBytes("{\"error\":\"Missing userId parameter\"}");
+            res.OutputStream.Write(errorBytes, 0, errorBytes.Length);
+            res.Close();
+            return;
         }
 
-        public async Task DisconnectAsync()
-        {
-            if (!IsConnected) return;
+        var token = SessionManager.GenerateSession(userId!);
 
-            var msg = new { type = "disconnect" };
-            var json = JsonSerializer.Serialize(msg);
-            var bytes = Encoding.UTF8.GetBytes(json);
+        var json = JsonSerializer.Serialize(new { token });
 
-            try
-            {
-                await playerSocket!.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
-                ConnectedToUserId = null;
-                Console.WriteLine("⛔️ Verbindung getrennt.");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Fehler beim Senden der Trennnachricht: {ex}");
-            }
-        }
+        var bytes = Encoding.UTF8.GetBytes(json);
+        res.ContentType = "application/json";
+        res.ContentEncoding = Encoding.UTF8;
+        res.ContentLength64 = bytes.Length;
+        res.OutputStream.Write(bytes, 0, bytes.Length);
+        res.Close();
 
-        public void Dispose()
-        {
-            cts?.Cancel();
-            playerSocket?.Dispose();
-        }
+        Console.WriteLine($"[HTTP] Token für userId '{userId}' ausgegeben.");
     }
 }
