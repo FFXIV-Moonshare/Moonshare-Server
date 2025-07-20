@@ -11,27 +11,22 @@ using WebSocketSharp;
 public static class ApiGatewayServer
 {
     private static HttpListener? _listener;
-
-    // Aktuelle Sessions vom AuthServer
     private static ConcurrentDictionary<string, AuthSession> _authSessions = new();
-
-    // Spieleranzahl vom PlayerServer (kann angepasst werden)
     private static int _playerCount = 0;
 
-    // WebSocket-Verbindungen zu Auth- und Player-Server
     private static WebSocket? _authServerSocket;
     private static WebSocket? _playerServerSocket;
 
     public static async Task StartAsync()
     {
         _listener = new HttpListener();
-        _listener.Prefixes.Add("http://62.68.75.23:8090/"); // API auf Port 8090
+        _listener.Prefixes.Add("http://62.68.75.23:8090/");
         _listener.Start();
 
         Console.WriteLine("[ApiGatewayServer] HTTP API läuft auf http://62.68.75.23:8090/");
 
-        ConnectToAuthServer();
-        ConnectToPlayerServer();
+        _ = Task.Run(MaintainAuthServerConnection);
+        _ = Task.Run(MaintainPlayerServerConnection);
 
         while (_listener.IsListening)
         {
@@ -42,7 +37,7 @@ public static class ApiGatewayServer
             }
             catch (HttpListenerException)
             {
-                break; // Listener gestoppt
+                break;
             }
             catch (Exception ex)
             {
@@ -51,91 +46,124 @@ public static class ApiGatewayServer
         }
     }
 
-    private static void ConnectToAuthServer()
+    private static async Task MaintainAuthServerConnection()
     {
-        _authServerSocket = new WebSocket("ws://62.68.75.23:5004/sessions");
-
-        _authServerSocket.OnOpen += (sender, e) =>
-        {
-            Console.WriteLine("[ApiGatewayServer] Verbunden mit AuthServer");
-            _authServerSocket.Send("GET_SESSIONS");
-        };
-
-        _authServerSocket.OnMessage += (sender, e) =>
+        while (true)
         {
             try
             {
-                var sessions = JsonSerializer.Deserialize<AuthSession[]>(e.Data);
-                if (sessions != null)
+                if (_authServerSocket == null || _authServerSocket.ReadyState != WebSocketState.Open)
                 {
-                    _authSessions.Clear();
-                    foreach (var s in sessions)
-                        _authSessions[s.SessionToken] = s;
+                    _authServerSocket = new WebSocket("ws://62.68.75.23:5004/sessions");
 
-                    Console.WriteLine($"[ApiGatewayServer] {_authSessions.Count} Sessions vom AuthServer empfangen");
-                    EventLogManager.LogInfo($"Empfangen {_authSessions.Count} Sessions vom AuthServer");
+                    _authServerSocket.OnOpen += (senderOpen, eOpen) =>
+                    {
+                        EventLogManager.LogInfo("AuthServer verbunden.");
+                        _authServerSocket.Send("GET_SESSIONS");
+                    };
+
+                    _authServerSocket.OnMessage += (senderMsg, eMsg) =>
+                    {
+                        try
+                        {
+                            var sessions = JsonSerializer.Deserialize<AuthSession[]>(eMsg.Data);
+                            if (sessions != null)
+                            {
+                                _authSessions.Clear();
+                                foreach (var session in sessions)
+                                    _authSessions[session.SessionToken] = session;
+
+                                EventLogManager.LogInfo($"Empfangen {_authSessions.Count} Sessions vom AuthServer");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            EventLogManager.LogError("Fehler beim Verarbeiten von Sessions: " + ex.Message);
+                        }
+                    };
+
+                    _authServerSocket.OnClose += (senderClose, eClose) =>
+                    {
+                        EventLogManager.LogInfo("AuthServer Verbindung geschlossen.");
+                        _authServerSocket = null;
+                    };
+
+                    _authServerSocket.OnError += (senderError, eError) =>
+                    {
+                        EventLogManager.LogError("AuthServer Fehler: " + eError.Message);
+                        _authServerSocket = null;
+                    };
+
+                    _authServerSocket.Connect();
                 }
+
+                if (_authServerSocket?.ReadyState == WebSocketState.Open)
+                    _authServerSocket.Send("GET_SESSIONS");
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[ApiGatewayServer] Fehler bei Sessions vom AuthServer: " + ex);
-                EventLogManager.LogError("Fehler bei Sessions vom AuthServer: " + ex.Message);
+                EventLogManager.LogError("Fehler in AuthServer-Wartung: " + ex.Message);
+                _authServerSocket = null;
             }
-        };
 
-        _authServerSocket.OnClose += (sender, e) =>
-        {
-            Console.WriteLine("[ApiGatewayServer] Verbindung zu AuthServer geschlossen, versuche neu in 5s...");
-            EventLogManager.LogInfo("Verbindung zu AuthServer geschlossen, erneuter Verbindungsversuch in 5s...");
-            Task.Delay(5000).ContinueWith(_ => ConnectToAuthServer());
-        };
-
-        _authServerSocket.OnError += (sender, e) =>
-        {
-            Console.WriteLine("[ApiGatewayServer] WebSocket Fehler AuthServer: " + e.Message);
-            EventLogManager.LogError("WebSocket Fehler AuthServer: " + e.Message);
-        };
-
-        _authServerSocket.Connect();
+            await Task.Delay(10000); // alle 10 Sekunden
+        }
     }
 
-    private static void ConnectToPlayerServer()
+    private static async Task MaintainPlayerServerConnection()
     {
-        _playerServerSocket = new WebSocket("ws://62.68.75.23:5002/player");
-
-        _playerServerSocket.OnOpen += (sender, e) =>
+        while (true)
         {
-            Console.WriteLine("[ApiGatewayServer] Verbunden mit PlayerServer");
-            _playerServerSocket.Send("PING");
-        };
-
-        _playerServerSocket.OnMessage += (sender, e) =>
-        {
-            Console.WriteLine("[ApiGatewayServer] Nachricht vom PlayerServer: " + e.Data);
-            EventLogManager.LogInfo("Nachricht vom PlayerServer: " + e.Data);
-
-            if (e.Data.StartsWith("PLAYER_COUNT:"))
+            try
             {
-                var countStr = e.Data.Substring("PLAYER_COUNT:".Length);
-                if (int.TryParse(countStr, out int count))
-                    _playerCount = count;
+                if (_playerServerSocket == null || _playerServerSocket.ReadyState != WebSocketState.Open)
+                {
+                    _playerServerSocket = new WebSocket("ws://62.68.75.23:5002/player");
+
+                    _playerServerSocket.OnOpen += (senderOpen, eOpen) =>
+                    {
+                        EventLogManager.LogInfo("PlayerServer verbunden.");
+                        _playerServerSocket.Send("PING");
+                    };
+
+                    _playerServerSocket.OnMessage += (senderMsg, eMsg) =>
+                    {
+                        EventLogManager.LogInfo("PlayerServer Nachricht: " + eMsg.Data);
+
+                        if (eMsg.Data.StartsWith("PLAYER_COUNT:"))
+                        {
+                            var countStr = eMsg.Data.Substring("PLAYER_COUNT:".Length);
+                            if (int.TryParse(countStr, out int count))
+                                _playerCount = count;
+                        }
+                    };
+
+                    _playerServerSocket.OnClose += (senderClose, eClose) =>
+                    {
+                        EventLogManager.LogInfo("PlayerServer Verbindung geschlossen.");
+                        _playerServerSocket = null;
+                    };
+
+                    _playerServerSocket.OnError += (senderError, eError) =>
+                    {
+                        EventLogManager.LogError("PlayerServer Fehler: " + eError.Message);
+                        _playerServerSocket = null;
+                    };
+
+                    _playerServerSocket.Connect();
+                }
+
+                if (_playerServerSocket?.ReadyState == WebSocketState.Open)
+                    _playerServerSocket.Send("PING");
             }
-        };
+            catch (Exception ex)
+            {
+                EventLogManager.LogError("Fehler in PlayerServer-Wartung: " + ex.Message);
+                _playerServerSocket = null;
+            }
 
-        _playerServerSocket.OnClose += (sender, e) =>
-        {
-            Console.WriteLine("[ApiGatewayServer] Verbindung zu PlayerServer geschlossen, versuche neu in 5s...");
-            EventLogManager.LogInfo("Verbindung zu PlayerServer geschlossen, erneuter Verbindungsversuch in 5s...");
-            Task.Delay(5000).ContinueWith(_ => ConnectToPlayerServer());
-        };
-
-        _playerServerSocket.OnError += (sender, e) =>
-        {
-            Console.WriteLine("[ApiGatewayServer] WebSocket Fehler PlayerServer: " + e.Message);
-            EventLogManager.LogError("WebSocket Fehler PlayerServer: " + e.Message);
-        };
-
-        _playerServerSocket.Connect();
+            await Task.Delay(10000); // alle 10 Sekunden
+        }
     }
 
     private static async Task HandleHttpRequest(HttpListenerContext context)
@@ -195,34 +223,6 @@ public class AuthSession
     public DateTime CreatedAt { get; set; }
 }
 
-public static class EventLogManager
-{
-    private static readonly ConcurrentQueue<string> _events = new();
-    private const int MaxEvents = 200;
-
-    public static void LogInfo(string message)
-        => Log($"[INFO] {message}");
-
-    public static void LogError(string message)
-        => Log($"[ERROR] {message}");
-
-    public static void LogDebug(string message)
-        => Log($"[DEBUG] {message}");
-
-    private static void Log(string message)
-    {
-        var formatted = $"[{DateTime.Now:HH:mm:ss}] {message}";
-        Console.WriteLine(formatted);
-
-        if (_events.Count >= MaxEvents)
-            _events.TryDequeue(out _);
-
-        _events.Enqueue(formatted);
-    }
-
-    public static List<string> GetRecentEvents()
-        => _events.ToList();
-}
 
 class Program
 {

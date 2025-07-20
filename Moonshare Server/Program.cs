@@ -1,10 +1,14 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using WebSocketSharp;
 using WebSocketSharp.Server;
+
+#region Session Models
 
 public class AuthSession
 {
@@ -13,58 +17,256 @@ public class AuthSession
     public DateTime CreatedAt { get; set; }
 }
 
+#endregion
+
+#region Session Manager
+
 public static class SessionManager
 {
     public static ConcurrentDictionary<string, AuthSession> Sessions = new();
+    public static ConcurrentDictionary<string, PlayerBehavior> ConnectedPlayers = new();
 
     public static bool ValidateSession(string token, out AuthSession? session)
     {
         return Sessions.TryGetValue(token, out session!);
     }
+
+    public static AuthSession[] GetOnlinePlayers()
+    {
+        return ConnectedPlayers.Values
+            .Select(pb => Sessions.Values.FirstOrDefault(s => s.UserId == pb.UserId))
+            .Where(s => s != null)
+            .ToArray()!;
+    }
 }
+
+#endregion
+
+#region Player Behavior
 
 public class PlayerBehavior : WebSocketBehavior
 {
-    private string _userId = string.Empty;
+    public string UserId { get; private set; } = string.Empty;
+    private static readonly string ReceivedFilesFolder = Path.Combine(AppContext.BaseDirectory, "ReceivedFiles");
+
+    private MemoryStream? fileBuffer;
+    private string? receivingFileName;
+    private string? receivingTargetUser;
+    private long receivingFileSize;
+    private long totalReceivedBytes;
+
+
+    protected override void OnOpen()
+    {
+        EventLogManager.LogInfo("New WebSocket connection from " + Context.UserEndPoint);
+
+        if (!Directory.Exists(ReceivedFilesFolder))
+            Directory.CreateDirectory(ReceivedFilesFolder);
+    }
 
     protected override void OnMessage(MessageEventArgs e)
     {
-        var message = e.Data;
-
-        if (message.StartsWith("SESSION:"))
+        if (e.IsBinary)
         {
-            var token = message.Substring("SESSION:".Length);
-
-            if (SessionManager.ValidateSession(token, out var session))
+            if (fileBuffer != null)
             {
-                _userId = session.UserId;
-                Send($"SESSION_OK:{_userId}");
-                EventLogManager.LogInfo($"{_userId} connected with valid session");
+                fileBuffer.Write(e.RawData);
+                totalReceivedBytes += e.RawData.Length;
             }
             else
             {
-                Send("SESSION_INVALID");
-                EventLogManager.LogError("Invalid session token received. Connection closed.");
-                Context.WebSocket.Close();
+                EventLogManager.LogError("Received binary data but no file transfer active.");
+            }
+            return;
+        }
+
+        var message = e.Data;
+        if (string.IsNullOrEmpty(message)) return;
+
+        var trimmed = message.TrimStart();
+        if (trimmed.StartsWith("{") || trimmed.StartsWith("["))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(message);
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("type", out var typeElem)) return;
+
+                var type = typeElem.GetString();
+
+                switch (type)
+                {
+                    case "session_auth":
+                        HandleSessionAuth(root);
+                        break;
+
+                    case "list_online":
+                        SendOnlineList();
+                        break;
+
+                    case "file_send_begin":
+                        HandleFileSendBegin(root);
+                        break;
+
+                    case "file_send_complete":
+                        HandleFileSendComplete(root);
+                        break;
+
+                    default:
+                        EventLogManager.LogInfo($"Unhandled message type: {type}");
+                        break;
+                }
+            }
+            catch (JsonException)
+            {
+                EventLogManager.LogError("Failed to parse JSON message.");
             }
         }
         else
         {
-            EventLogManager.LogInfo($"{_userId}: {message}");
-            Send($"ECHO ({_userId}): {message}");
+            EventLogManager.LogInfo($"Received non-JSON message: {message}");
         }
     }
 
-    protected override void OnOpen()
+    private void HandleSessionAuth(JsonElement root)
     {
-        EventLogManager.LogInfo($"New WebSocket connection from {Context.UserEndPoint}");
+        if (!root.TryGetProperty("token", out var tokenElem))
+        {
+            Send("SESSION_INVALID");
+            Context.WebSocket.Close();
+            return;
+        }
+
+        var token = tokenElem.GetString() ?? "";
+
+        if (SessionManager.ValidateSession(token, out var session))
+        {
+            UserId = session.UserId;
+            SessionManager.ConnectedPlayers[ID] = this;
+            Send($"SESSION_OK:{UserId}");
+            EventLogManager.LogInfo($"{UserId} connected with valid session");
+        }
+        else
+        {
+            Send("SESSION_INVALID");
+            Context.WebSocket.Close();
+        }
+    }
+
+    private void SendOnlineList()
+    {
+        var online = SessionManager.GetOnlinePlayers();
+        var json = JsonSerializer.Serialize(online);
+        Send("ONLINE:" + json);
+    }
+
+    private void HandleFileSendBegin(JsonElement root)
+    {
+        if (!root.TryGetProperty("targetUserId", out var targetElem) ||
+            !root.TryGetProperty("fileName", out var fileNameElem) ||
+            !root.TryGetProperty("fileSize", out var fileSizeElem))
+        {
+            Send("FILE_FAILED: Missing file_send_begin parameters");
+            return;
+        }
+
+        receivingTargetUser = targetElem.GetString();
+        receivingFileName = SanitizeFileName(fileNameElem.GetString() ?? "unnamed");
+        receivingFileSize = fileSizeElem.GetInt64();
+        totalReceivedBytes = 0;
+        fileBuffer = new MemoryStream();
+
+        // ACK an Client - genau so wie Client es erwartet ("file_receive_ready" klein)
+        Send("file_receive_ready");
+
+        EventLogManager.LogInfo($"Started receiving file '{receivingFileName}' ({receivingFileSize} bytes) from user {UserId}");
+    }
+
+    private string SanitizeFileName(string name)
+    {
+        foreach (var c in Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+
+        // Pfad-Traversal verhindern
+        name = name.Replace("/", "_").Replace("\\", "_");
+
+        return name;
+    }
+
+
+
+    private void HandleFileSendComplete(JsonElement root)
+    {
+        if (fileBuffer == null || receivingFileName == null || receivingTargetUser == null)
+        {
+            Send("FILE_FAILED: Missing state for completion");
+            return;
+        }
+
+        if (totalReceivedBytes != receivingFileSize)
+        {
+            Send("FILE_FAILED: Size mismatch");
+            EventLogManager.LogError($"File size mismatch: expected {receivingFileSize}, received {totalReceivedBytes}");
+            fileBuffer.Dispose();
+            ClearFileTransferState();
+            return;
+        }
+
+        string saveFolder = Path.Combine(ReceivedFilesFolder, Guid.NewGuid().ToString());
+        Directory.CreateDirectory(saveFolder);
+        string path = Path.Combine(saveFolder, receivingFileName);
+        File.WriteAllBytes(path, fileBuffer.ToArray());
+        EventLogManager.LogInfo($"File saved: {path}");
+
+        // Datei an Zieluser weiterleiten, wenn verbunden
+        var target = SessionManager.ConnectedPlayers.Values.FirstOrDefault(p => p.UserId == receivingTargetUser);
+        if (target != null)
+        {
+            var headerObj = new
+            {
+                type = "file_from",
+                fromUserId = UserId,
+                fileName = receivingFileName,
+                fileSize = receivingFileSize
+            };
+            var headerJson = JsonSerializer.Serialize(headerObj);
+
+            target.Send(headerJson);
+            target.Send(fileBuffer.ToArray());
+            Send("FILE_SENT");
+            EventLogManager.LogInfo($"File forwarded to {receivingTargetUser}");
+        }
+        else
+        {
+            Send("FILE_SENT_SERVER_ONLY");
+            EventLogManager.LogInfo($"Target user {receivingTargetUser} not connected, file saved on server only");
+        }
+
+        fileBuffer.Dispose();
+        ClearFileTransferState();
+    }
+
+
+    private void ClearFileTransferState()
+    {
+        fileBuffer = null;
+        receivingFileName = null;
+        receivingTargetUser = null;
+        receivingFileSize = 0;
+        totalReceivedBytes = 0;
     }
 
     protected override void OnClose(CloseEventArgs e)
     {
-        EventLogManager.LogInfo($"Connection closed for user {_userId}");
+        SessionManager.ConnectedPlayers.TryRemove(ID, out _);
+        EventLogManager.LogInfo("Connection closed for user " + UserId);
     }
+
+
 }
+#endregion
+
+#region Player Server
 
 public static class PlayerServer
 {
@@ -81,9 +283,6 @@ public static class PlayerServer
 
         ConnectAndStartSessionUpdates();
 
-       
-        EventLogManager.LogInfo("API läuft unter http://62.68.75.23:8080/");
-        EventLogManager.LogInfo("Press Enter to stop PlayerServer...");
         Console.ReadLine();
 
         sessionUpdateTimer?.Dispose();
@@ -97,27 +296,26 @@ public static class PlayerServer
     {
         authServerSocket = new WebSocket("ws://62.68.75.23:5004/sessions");
 
-        authServerSocket.OnOpen += (sender, e) =>
+        authServerSocket.OnOpen += (s, e) =>
         {
             EventLogManager.LogInfo("Connected to AuthServer /sessions");
             RequestSessions();
             StartSessionUpdateTimer();
         };
 
-        authServerSocket.OnMessage += (sender, e) =>
+        authServerSocket.OnMessage += (s, e) =>
         {
-            EventLogManager.LogInfo("Sessions received from AuthServer");
             UpdateSessions(e.Data);
         };
 
-        authServerSocket.OnError += (sender, e) =>
+        authServerSocket.OnError += (s, e) =>
         {
-            EventLogManager.LogError($"WebSocket error: {e.Message}");
+            EventLogManager.LogError("WebSocket error: " + e.Message);
         };
 
-        authServerSocket.OnClose += (sender, e) =>
+        authServerSocket.OnClose += (s, e) =>
         {
-            EventLogManager.LogError("AuthServer connection closed. Reconnecting in 5s...");
+            EventLogManager.LogError("AuthServer disconnected. Reconnecting in 5s...");
             sessionUpdateTimer?.Dispose();
             Task.Delay(5000).ContinueWith(_ => ConnectAndStartSessionUpdates());
         };
@@ -150,34 +348,26 @@ public static class PlayerServer
                 foreach (var s in sessions)
                     SessionManager.Sessions[s.SessionToken] = s;
 
-                EventLogManager.LogInfo($"{sessions.Length} sessions updated from AuthServer.");
+                EventLogManager.LogInfo(sessions.Length + " sessions updated from AuthServer.");
             }
         }
         catch (Exception ex)
         {
-            EventLogManager.LogError($"Error updating sessions: {ex}");
+            EventLogManager.LogError("Error updating sessions: " + ex);
         }
     }
 }
+
+#endregion
+
+#region Program Entry
 
 class Program
 {
     static async Task Main(string[] args)
     {
-        if (args.Length == 0)
-        {
-            EventLogManager.LogInfo("No argument specified, starting PlayerServer by default.");
-            await PlayerServer.StartAsync();
-            return;
-        }
-
-        if (args[0].Equals("player", StringComparison.OrdinalIgnoreCase))
-        {
-            await PlayerServer.StartAsync();
-        }
-        else
-        {
-            EventLogManager.LogError("Unknown argument. Use 'player'");
-        }
+        await PlayerServer.StartAsync();
     }
 }
+
+#endregion

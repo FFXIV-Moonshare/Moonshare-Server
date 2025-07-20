@@ -44,6 +44,24 @@ public static class SessionManager
     public static string GetSessionsJson()
         => JsonSerializer.Serialize(Sessions.Values);
 
+    public static bool RefreshSession(string token)
+    {
+        if (Sessions.TryGetValue(token, out var session))
+        {
+            session.CreatedAt = DateTime.UtcNow;
+            return true;
+        }
+        return false;
+    }
+
+    public static void RemoveSession(string token)
+    {
+        if (Sessions.TryRemove(token, out var session))
+        {
+            Console.WriteLine($"[AuthServer] Session {token} removed (UserId: {session.UserId})");
+        }
+    }
+
     public static void CleanupExpiredSessions(TimeSpan maxAge)
     {
         var expiredTokens = Sessions
@@ -61,18 +79,48 @@ public static class SessionManager
 
 public class AuthBehavior : WebSocketBehavior
 {
+    private string? SessionToken;
+
     protected override void OnMessage(MessageEventArgs e)
     {
-        var userId = e.Data.Trim();
+        var message = e.Data.Trim();
+
+        if (message.StartsWith("SESSION:"))
+        {
+            var token = message.Substring("SESSION:".Length);
+            if (SessionManager.RefreshSession(token))
+            {
+                SessionToken = token;
+                Send("HEARTBEAT_OK");
+                Console.WriteLine($"[AuthServer] Session {token} refreshed.");
+            }
+            else
+            {
+                Send("SESSION_INVALID");
+                Console.WriteLine($"[AuthServer] Invalid session token received: {token}");
+                Context.WebSocket.Close();
+            }
+            return;
+        }
+
+        var userId = message;
         if (string.IsNullOrWhiteSpace(userId))
         {
             Send("AUTH_FAIL:EmptyUserId");
             Context.WebSocket.Close();
             return;
         }
-        var token = SessionManager.GenerateSession(userId);
-        Send($"AUTH_SUCCESS:{token}");
-        Console.WriteLine($"[AuthServer] Authenticated user '{userId}' with token '{token}'");
+        var tokenNew = SessionManager.GenerateSession(userId);
+        SessionToken = tokenNew;
+        Send($"AUTH_SUCCESS:{tokenNew}");
+        Console.WriteLine($"[AuthServer] Authenticated user '{userId}' with token '{tokenNew}'");
+    }
+
+    protected override void OnClose(CloseEventArgs e)
+    {
+        // Änderung: Session bleibt erhalten und läuft über Timer ab
+        Console.WriteLine($"[AuthServer] WebSocket closed. Session {SessionToken} remains until timeout.");
+        base.OnClose(e);
     }
 }
 
@@ -99,7 +147,7 @@ class Program
 
     static async Task Main()
     {
-        var wssv = new WebSocketServer("ws://62.68.75.23:5004"); // WebSocket port 5004
+        var wssv = new WebSocketServer("ws://62.68.75.23:5004");
         wssv.AddWebSocketService<AuthBehavior>("/auth");
         wssv.AddWebSocketService<SessionQueryBehavior>("/sessions");
         wssv.Start();
@@ -110,8 +158,8 @@ class Program
         httpListener.Start();
         Console.WriteLine("✅ HTTP AuthServer läuft auf http://62.68.75.23:5003/sessions/");
 
-        var cleanupTimer = new System.Timers.Timer(60000);
-        cleanupTimer.Elapsed += (_, _) => SessionManager.CleanupExpiredSessions(TimeSpan.FromMinutes(10));
+        var cleanupTimer = new System.Timers.Timer(30000); // 30 Sekunden
+        cleanupTimer.Elapsed += (_, _) => SessionManager.CleanupExpiredSessions(TimeSpan.FromSeconds(30));
         cleanupTimer.Start();
 
         var httpTask = Task.Run(async () =>
