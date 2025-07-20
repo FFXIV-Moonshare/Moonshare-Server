@@ -7,6 +7,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PlayerServer", "Moonshare S
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AuthServer", "AuthServer\AuthServer.csproj", "{CDE0D9AD-67F6-4E5B-8589-A639684EE3C6}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ApiGatewayServer", "ApiGatewayServer\ApiGatewayServer.csproj", "{FBA0C749-27BC-4244-BFD2-CAAC18523743}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +23,10 @@ Global
 		{CDE0D9AD-67F6-4E5B-8589-A639684EE3C6}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{CDE0D9AD-67F6-4E5B-8589-A639684EE3C6}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{CDE0D9AD-67F6-4E5B-8589-A639684EE3C6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FBA0C749-27BC-4244-BFD2-CAAC18523743}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FBA0C749-27BC-4244-BFD2-CAAC18523743}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FBA0C749-27BC-4244-BFD2-CAAC18523743}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FBA0C749-27BC-4244-BFD2-CAAC18523743}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

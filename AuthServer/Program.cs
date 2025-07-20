@@ -99,16 +99,16 @@ class Program
 
     static async Task Main()
     {
-        var wssv = new WebSocketServer("ws://localhost:5004"); // WebSocket port 5004
+        var wssv = new WebSocketServer("ws://62.68.75.23:5004"); // WebSocket port 5004
         wssv.AddWebSocketService<AuthBehavior>("/auth");
         wssv.AddWebSocketService<SessionQueryBehavior>("/sessions");
         wssv.Start();
-        Console.WriteLine("✅ WebSocket AuthServer läuft auf ws://localhost:5004/auth und /sessions");
+        Console.WriteLine("✅ WebSocket AuthServer läuft auf ws://62.68.75.23:5004/auth und /sessions");
 
         httpListener = new HttpListener();
-        httpListener.Prefixes.Add("http://localhost:5003/sessions/");
+        httpListener.Prefixes.Add("http://62.68.75.23:5003/sessions/");
         httpListener.Start();
-        Console.WriteLine("✅ HTTP AuthServer läuft auf http://localhost:5003/sessions/");
+        Console.WriteLine("✅ HTTP AuthServer läuft auf http://62.68.75.23:5003/sessions/");
 
         var cleanupTimer = new System.Timers.Timer(60000);
         cleanupTimer.Elapsed += (_, _) => SessionManager.CleanupExpiredSessions(TimeSpan.FromMinutes(10));

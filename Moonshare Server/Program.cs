@@ -39,19 +39,30 @@ public class PlayerBehavior : WebSocketBehavior
             {
                 _userId = session.UserId;
                 Send($"SESSION_OK:{_userId}");
-                Console.WriteLine($"[PlayerServer] {_userId} connected with valid session");
+                EventLogManager.LogInfo($"{_userId} connected with valid session");
             }
             else
             {
                 Send("SESSION_INVALID");
+                EventLogManager.LogError("Invalid session token received. Connection closed.");
                 Context.WebSocket.Close();
             }
         }
         else
         {
-            Console.WriteLine($"[PlayerServer] {_userId}: {message}");
+            EventLogManager.LogInfo($"{_userId}: {message}");
             Send($"ECHO ({_userId}): {message}");
         }
+    }
+
+    protected override void OnOpen()
+    {
+        EventLogManager.LogInfo($"New WebSocket connection from {Context.UserEndPoint}");
+    }
+
+    protected override void OnClose(CloseEventArgs e)
+    {
+        EventLogManager.LogInfo($"Connection closed for user {_userId}");
     }
 }
 
@@ -62,15 +73,17 @@ public static class PlayerServer
 
     public static Task StartAsync()
     {
-        var wssv = new WebSocketServer("ws://localhost:5002");
+        var wssv = new WebSocketServer("ws://62.68.75.23:5002");
         wssv.AddWebSocketService<PlayerBehavior>("/player");
         wssv.Start();
 
-        Console.WriteLine("🎮 PlayerServer running on ws://localhost:5002/player");
+        EventLogManager.LogInfo("🎮 PlayerServer running on ws://62.68.75.23:5002/player");
 
         ConnectAndStartSessionUpdates();
 
-        Console.WriteLine("Press Enter to stop PlayerServer...");
+       
+        EventLogManager.LogInfo("API läuft unter http://62.68.75.23:8080/");
+        EventLogManager.LogInfo("Press Enter to stop PlayerServer...");
         Console.ReadLine();
 
         sessionUpdateTimer?.Dispose();
@@ -82,29 +95,29 @@ public static class PlayerServer
 
     private static void ConnectAndStartSessionUpdates()
     {
-        authServerSocket = new WebSocket("ws://localhost:5004/sessions"); // Corrected port here!
+        authServerSocket = new WebSocket("ws://62.68.75.23:5004/sessions");
 
         authServerSocket.OnOpen += (sender, e) =>
         {
-            Console.WriteLine("[PlayerServer] Connected to AuthServer /sessions");
+            EventLogManager.LogInfo("Connected to AuthServer /sessions");
             RequestSessions();
             StartSessionUpdateTimer();
         };
 
         authServerSocket.OnMessage += (sender, e) =>
         {
-            Console.WriteLine("[PlayerServer] Sessions received from AuthServer");
+            EventLogManager.LogInfo("Sessions received from AuthServer");
             UpdateSessions(e.Data);
         };
 
         authServerSocket.OnError += (sender, e) =>
         {
-            Console.WriteLine($"[PlayerServer] WebSocket error: {e.Message}");
+            EventLogManager.LogError($"WebSocket error: {e.Message}");
         };
 
         authServerSocket.OnClose += (sender, e) =>
         {
-            Console.WriteLine("[PlayerServer] AuthServer connection closed. Reconnecting in 5s...");
+            EventLogManager.LogError("AuthServer connection closed. Reconnecting in 5s...");
             sessionUpdateTimer?.Dispose();
             Task.Delay(5000).ContinueWith(_ => ConnectAndStartSessionUpdates());
         };
@@ -137,12 +150,12 @@ public static class PlayerServer
                 foreach (var s in sessions)
                     SessionManager.Sessions[s.SessionToken] = s;
 
-                Console.WriteLine($"[PlayerServer] {sessions.Length} sessions updated.");
+                EventLogManager.LogInfo($"{sessions.Length} sessions updated from AuthServer.");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[PlayerServer] Error updating sessions: {ex}");
+            EventLogManager.LogError($"Error updating sessions: {ex}");
         }
     }
 }
@@ -153,7 +166,7 @@ class Program
     {
         if (args.Length == 0)
         {
-            Console.WriteLine("No argument specified, starting PlayerServer by default.");
+            EventLogManager.LogInfo("No argument specified, starting PlayerServer by default.");
             await PlayerServer.StartAsync();
             return;
         }
@@ -164,7 +177,7 @@ class Program
         }
         else
         {
-            Console.WriteLine("Unknown argument. Use 'player'");
+            EventLogManager.LogError("Unknown argument. Use 'player'");
         }
     }
 }
