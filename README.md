@@ -1,79 +1,103 @@
-# 🌙 Moonshare Server
+🌙 Moonshare Server
 
-**Moonshare Server** is the backend infrastructure for the Moonshare Dalamud plugin, enabling secure peer-to-peer communication and session management in **FINAL FANTASY XIV**.
+Moonshare Server ist die Backend-Infrastruktur des Moonshare Dalamud-Plugins und ermöglicht sichere Peer-to-Peer-Kommunikation sowie Sitzungsverwaltung in FINAL FANTASY XIV.
 
-This repository contains the core server-side components of Moonshare, including:
+Dieses Repository enthält die zentralen Server-Komponenten von Moonshare:
 
-- `AuthServer`: Handles user authentication and session token generation
-- `PlayerServer`: Manages real-time player connections and data exchange via WebSocket
+    AuthServer: Verarbeitet die Benutzer-Authentifizierung und erzeugt Session-Tokens
 
-> ⚠️ This project is in early development (ALPHA). Breaking changes are likely.
+    PlayerServer: Verwaltet Echtzeit-Spielerverbindungen und Datenaustausch über WebSocket
 
----
+    ApiGatewayServer: Bietet eine HTTP-API, über die z. B. Discord-Bots den aktuellen Serverstatus, Sessions und Logs abfragen können
 
-## 📁 Structure
+    ⚠️ Dieses Projekt befindet sich in einer frühen Entwicklungsphase (ALPHA). Breaking Changes sind zu erwarten.
+
+📁 Projektstruktur
 
 /Moonshare-Server
-├── AuthServer/ # WebSocket server for UID-based authentication
-├── PlayerServer/ # WebSocket server for in-game data sessions
-├── Shared/ # Shared types and session logic
+├── ApiGatewayServer/   # HTTP-API Server für Abfragen von Sessions, Logs etc.
+├── AuthServer/         # WebSocket-Server für UID-basierte Authentifizierung
+├── PlayerServer/       # WebSocket-Server für Ingame-Daten-Sessions
+├── Shared/             # Gemeinsame Typen und Sitzungslogik
 ├── Moonshare.Shared.csproj
 └── README.md
 
+🔒 AuthServer
 
----
+Der AuthServer ist zuständig für:
 
-## 🔒 AuthServer
+    Verarbeitung der ersten Verbindungen von Dalamud-Clients
 
-The `AuthServer` component is responsible for:
+    Annahme der vom Nutzer bereitgestellten UID und Vergabe von Session-Tokens
 
-- Handling initial connections from Dalamud clients
-- Accepting user-provided UID and issuing session tokens
-- Validating and storing active sessions in memory
+    Validierung und Verwaltung aktiver Sessions im Speicher
 
-### Features
+Features
 
-- Lightweight WebSocket server using `WebSocketSharp`
-- JSON-based communication
-- Thread-safe session storage
+    Leichter WebSocket-Server basierend auf WebSocketSharp
 
----
+    JSON-basierte Kommunikation
 
-## 🧩 PlayerServer
+    Thread-sichere Speicherung von Sessions
 
-The `PlayerServer` handles:
+🧩 PlayerServer
 
-- Persistent WebSocket sessions between authenticated users
-- Real-time message exchange for file sharing or other plugin logic
-- Live session lookups using tokens from `AuthServer`
+Der PlayerServer übernimmt:
 
-### Features
+    Verwaltung persistenter WebSocket-Sessions authentifizierter Nutzer
 
-- Bidirectional communication for game-integrated messaging
-- Plug-and-play structure for extending protocol
-- In-memory session resolution from `AuthServer`
+    Echtzeit-Kommunikation für Dateiaustausch oder andere Plugin-Funktionen
 
----
+    Live-Sitzungsabfragen mit Tokens vom AuthServer
 
-## 🛠️ Requirements
+Features
 
-- [.NET 8 SDK](https://dotnet.microsoft.com/en-us/download)  
-- Open port(s) for WebSocket (default: 8080 / 9090)  
-- Optional reverse proxy for production (e.g., Nginx or Caddy)
+    Bidirektionale Kommunikation für spielintegrierte Nachrichten
 
----
+    Erweiterbare Struktur für zusätzliche Protokollfunktionen
 
-## 🚀 Getting Started
+    In-Memory Sitzungsverwaltung basierend auf AuthServer
 
-### 1. Clone the repository
+🌐 ApiGatewayServer
 
-```bash
+Der ApiGatewayServer stellt eine RESTful HTTP-API bereit, über die externe Clients (z.B. Discord-Bots) den aktuellen Zustand der Server abrufen können:
+
+    Aktive Sessions (vom AuthServer verwaltet)
+
+    Verbundene Spieler (vom PlayerServer)
+
+    Laufende Logs und Events
+
+    Statistiken und Monitoring-Daten
+
+Features
+
+    Einfache HTTP-Endpunkte (z.B. /sessions, /players, /logs)
+
+    JSON-Antworten für einfache Integration
+
+    Aktualisierung in Echtzeit basierend auf den Daten der anderen Server
+
+🛠️ Voraussetzungen
+
+    .NET 8 SDK
+
+    Offene Ports für WebSocket- (Standard: 8080 / 9090) und HTTP-Verbindungen (z.B. 5000)
+
+    Optional: Reverse Proxy für den Produktivbetrieb (z.B. Nginx oder Caddy)
+
+🚀 Erste Schritte
+1. Repository klonen
+
 git clone https://github.com/FFXIV-Moonshare/Moonshare-Server.git
 cd Moonshare-Server
 
-2. Build and run both servers
+2. Server starten
 
-cd AuthServer
+cd ApiGatewayServer
+dotnet run
+
+cd ../AuthServer
 dotnet run
 
 cd ../PlayerServer
