@@ -2,6 +2,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Timers;
 using WebSocketSharp.Server;
@@ -12,83 +13,132 @@ namespace Moonshare.Server.Server
 {
     public static class AuthServer
     {
-        private static HttpListener? httpListener;
+        private static HttpListener? _httpListener;
+        private static System.Timers.Timer? _cleanupTimer;
+        private static WebSocketServer? _webSocketServer;
+        private static CancellationTokenSource? _cts;
+
+        private const string WebSocketUrl = "ws://62.68.75.23:5004";
+        private const string HttpUrl = "http://62.68.75.23:5003/sessions/";
+
 
         public static async Task StartAsync()
         {
-            var wssv = new WebSocketServer("ws://62.68.75.23:5004");
-            wssv.AddWebSocketService<AuthBehavior>("/auth");
-            wssv.AddWebSocketService<SessionQueryBehavior>("/sessions");
-            wssv.Start();
-            Console.WriteLine("✅ WebSocket AuthServer läuft auf ws://62.68.75.23:5004/auth und /sessions");
+            _cts = new CancellationTokenSource();
 
-            httpListener = new HttpListener();
-            httpListener.Prefixes.Add("http://62.68.75.23:5003/sessions/");
-            httpListener.Start();
-            Console.WriteLine("✅ HTTP AuthServer läuft auf http://62.68.75.23:5003/sessions/");
+            _webSocketServer = new WebSocketServer(WebSocketUrl);
+            _webSocketServer.AddWebSocketService<AuthBehavior>("/auth");
+            _webSocketServer.AddWebSocketService<SessionQueryBehavior>("/sessions");
+            _webSocketServer.Start();
+            Console.WriteLine($"✅ WebSocket AuthServer läuft auf {WebSocketUrl}/auth und /sessions");
 
-            var cleanupTimer = new System.Timers.Timer(30000);
-            cleanupTimer.Elapsed += (_, _) => SessionManager.CleanupExpiredSessions(TimeSpan.FromSeconds(30));
-            cleanupTimer.Start();
+            _httpListener = new HttpListener();
+            _httpListener.Prefixes.Add(HttpUrl);
+            _httpListener.Start();
+            Console.WriteLine($"✅ HTTP AuthServer läuft auf {HttpUrl}");
 
-            _ = Task.Run(async () =>
-            {
-                while (httpListener.IsListening)
-                {
-                    try
-                    {
-                        var ctx = await httpListener.GetContextAsync();
-                        ProcessHttpRequest(ctx);
-                    }
-                    catch (HttpListenerException) { break; }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[HTTP] Fehler: {ex}");
-                    }
-                }
-            });
+            
+            _cleanupTimer = new System.Timers.Timer(30_000);
+            _cleanupTimer.Elapsed += (s, e) => SessionManager.CleanupInactiveSessions();
+            _cleanupTimer.Start();
 
-            Console.WriteLine("Drücke Enter zum Stoppen...");
-            Console.ReadLine();
+            await ListenHttpAsync(_cts.Token);
 
-            cleanupTimer.Stop();
-            httpListener.Stop();
-            wssv.Stop();
+            await StopAsync();
         }
 
-        private static void ProcessHttpRequest(HttpListenerContext ctx)
+        private static async Task ListenHttpAsync(CancellationToken cancellationToken)
+        {
+            while (_httpListener?.IsListening == true && !cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    var ctx = await _httpListener.GetContextAsync();
+
+                   
+                    _ = Task.Run(() => ProcessHttpRequestAsync(ctx), cancellationToken);
+                }
+                catch (HttpListenerException)
+                {
+                   
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[HTTP] Fehler: {ex}");
+                }
+            }
+        }
+
+        private static async Task ProcessHttpRequestAsync(HttpListenerContext ctx)
         {
             var req = ctx.Request;
             var res = ctx.Response;
 
-            if (req.HttpMethod != "GET")
+            try
             {
-                res.StatusCode = 405;
-                res.Close();
-                return;
-            }
+                if (req.HttpMethod != "GET")
+                {
+                    res.StatusCode = 405;
+                    return;
+                }
 
-            var userId = req.QueryString["userId"];
-            if (string.IsNullOrWhiteSpace(userId))
+                var userId = req.QueryString["userId"];
+                if (string.IsNullOrWhiteSpace(userId))
+                {
+                    res.StatusCode = 400;
+                    var errorBytes = Encoding.UTF8.GetBytes("{\"error\":\"Missing userId parameter\"}");
+                    await res.OutputStream.WriteAsync(errorBytes, 0, errorBytes.Length);
+                    return;
+                }
+
+                // IP aus HTTP-Request auslesen
+                var clientAddress = req.RemoteEndPoint?.Address.ToString() ?? "unknown";
+
+                var token = SessionManager.GenerateSession(userId!, clientAddress);
+                var json = JsonSerializer.Serialize(new { token });
+                var bytes = Encoding.UTF8.GetBytes(json);
+
+                res.ContentType = "application/json";
+                res.ContentEncoding = Encoding.UTF8;
+                res.ContentLength64 = bytes.Length;
+                await res.OutputStream.WriteAsync(bytes, 0, bytes.Length);
+
+                Console.WriteLine($"[HTTP] Token für userId '{userId}' ausgegeben von {clientAddress}.");
+            }
+            catch (Exception ex)
             {
-                res.StatusCode = 400;
-                var errorBytes = Encoding.UTF8.GetBytes("{\"error\":\"Missing userId parameter\"}");
-                res.OutputStream.Write(errorBytes, 0, errorBytes.Length);
-                res.Close();
-                return;
+                Console.WriteLine($"[HTTP] Fehler beim Verarbeiten der Anfrage: {ex}");
+                res.StatusCode = 500;
             }
+            finally
+            {
+                res.Close();
+            }
+        }
 
-            var token = SessionManager.GenerateSession(userId!);
-            var json = JsonSerializer.Serialize(new { token });
-            var bytes = Encoding.UTF8.GetBytes(json);
 
-            res.ContentType = "application/json";
-            res.ContentEncoding = Encoding.UTF8;
-            res.ContentLength64 = bytes.Length;
-            res.OutputStream.Write(bytes, 0, bytes.Length);
-            res.Close();
+        public static async Task StopAsync()
+        {
+            _cts?.Cancel();
 
-            Console.WriteLine($"[HTTP] Token für userId '{userId}' ausgegeben.");
+            _cleanupTimer?.Stop();
+            _cleanupTimer?.Dispose();
+            _cleanupTimer = null;
+
+            if (_httpListener?.IsListening == true)
+            {
+                _httpListener.Stop();
+            }
+            _httpListener?.Close();
+            _httpListener = null;
+
+            _webSocketServer?.Stop();
+            _webSocketServer = null;
+
+            Console.WriteLine("AuthServer gestoppt.");
+
+            await Task.CompletedTask;
         }
     }
 }

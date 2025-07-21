@@ -7,48 +7,33 @@ namespace Moonshare.Server.WebSocket
 {
     public class AuthBehavior : WebSocketBehavior
     {
-        private string? SessionToken;
+        private string? _sessionToken;
+        private string? _clientAddress;
 
-        protected override void OnMessage(MessageEventArgs e)
+        protected override void OnOpen()
         {
-            var message = e.Data.Trim();
+            _clientAddress = Context.UserEndPoint?.Address.ToString() ?? "unknown";
 
-            if (message.StartsWith("SESSION:"))
-            {
-                var token = message.Substring("SESSION:".Length);
-                if (SessionManager.RefreshSession(token))
-                {
-                    SessionToken = token;
-                    Send("HEARTBEAT_OK");
-                    Console.WriteLine($"[AuthServer] Session {token} refreshed.");
-                }
-                else
-                {
-                    Send("SESSION_INVALID");
-                    Console.WriteLine($"[AuthServer] Invalid session token received: {token}");
-                    Context.WebSocket.Close();
-                }
-                return;
-            }
-
-            var userId = message;
+            
+            var userId = Context.QueryString["userId"];
             if (string.IsNullOrWhiteSpace(userId))
             {
-                Send("AUTH_FAIL:EmptyUserId");
-                Context.WebSocket.Close();
+                Console.WriteLine("[AuthBehavior] Connection rejected: missing userId");
+                Context.WebSocket.Close(CloseStatusCode.PolicyViolation, "Missing userId");
                 return;
             }
 
-            var tokenNew = SessionManager.GenerateSession(userId);
-            SessionToken = tokenNew;
-            Send($"AUTH_SUCCESS:{tokenNew}");
-            Console.WriteLine($"[AuthServer] Authenticated user '{userId}' with token '{tokenNew}'");
+            _sessionToken = SessionManager.GenerateSession(userId, _clientAddress);
+            Console.WriteLine($"[AuthBehavior] New connection from {_clientAddress} with token {_sessionToken}");
         }
 
         protected override void OnClose(CloseEventArgs e)
         {
-            Console.WriteLine($"[AuthServer] WebSocket closed. Session {SessionToken} remains until timeout.");
-            base.OnClose(e);
+            if (_sessionToken != null)
+            {
+                SessionManager.MarkSessionInactive(_sessionToken);
+                Console.WriteLine($"[AuthBehavior] Connection closed for session {_sessionToken}");
+            }
         }
     }
 }

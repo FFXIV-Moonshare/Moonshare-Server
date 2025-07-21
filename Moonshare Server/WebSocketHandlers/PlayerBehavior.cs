@@ -1,12 +1,7 @@
 ﻿using Moonshare.Server.Managers;
-using Moonshare.Server.Models;
-using System;
-using System.IO;
-using System.Linq;
 using System.Text.Json;
 using WebSocketSharp;
 using WebSocketSharp.Server;
-using System.Collections.Generic;
 
 namespace Moonshare.Server.WebSocketHandlers
 {
@@ -21,9 +16,17 @@ namespace Moonshare.Server.WebSocketHandlers
         private long receivingFileSize;
         private long totalReceivedBytes;
 
+        private readonly PlayerServerInstance _serverInstance;
+        
+
+        public PlayerBehavior(PlayerServerInstance instance)
+        {
+            _serverInstance = instance;
+        }
+
         protected override void OnOpen()
         {
-            EventLogManager.LogInfo("New WebSocket connection from " + Context.UserEndPoint);
+            Serilog.Log.Information("New WebSocket connection from {EndPoint}", Context.UserEndPoint);
             if (!Directory.Exists(ReceivedFilesFolder))
                 Directory.CreateDirectory(ReceivedFilesFolder);
         }
@@ -39,7 +42,7 @@ namespace Moonshare.Server.WebSocketHandlers
                 }
                 else
                 {
-                    EventLogManager.LogError("Received binary data but no file transfer active.");
+                    Serilog.Log.Error("Received binary data but no file transfer active.");
                 }
                 return;
             }
@@ -63,17 +66,19 @@ namespace Moonshare.Server.WebSocketHandlers
                         case "list_online": SendOnlineList(); break;
                         case "file_send_begin": HandleFileSendBegin(root); break;
                         case "file_send_complete": HandleFileSendComplete(root); break;
-                        default: EventLogManager.LogInfo($"Unhandled message type: {type}"); break;
+                        default:
+                            Serilog.Log.Information("Unhandled message type: {Type}", type);
+                            break;
                     }
                 }
                 catch (JsonException)
                 {
-                    EventLogManager.LogError("Failed to parse JSON message.");
+                    Serilog.Log.Error("Failed to parse JSON message.");
                 }
             }
             else
             {
-                EventLogManager.LogInfo($"Received non-JSON message: {message}");
+                Serilog.Log.Information("Received non-JSON message: {Message}", message);
             }
         }
 
@@ -92,7 +97,8 @@ namespace Moonshare.Server.WebSocketHandlers
                 UserId = session.UserId;
                 SessionManager.ConnectedPlayers[ID] = this;
                 Send($"SESSION_OK:{UserId}");
-                EventLogManager.LogInfo($"{UserId} connected with valid session");
+                Serilog.Log.Information("{UserId} connected with valid session", UserId);
+                _serverInstance.SendInstanceInfoToClient(Context.WebSocket);
             }
             else
             {
@@ -125,7 +131,7 @@ namespace Moonshare.Server.WebSocketHandlers
             fileBuffer = new MemoryStream();
 
             Send("file_receive_ready");
-            EventLogManager.LogInfo($"Started receiving file '{receivingFileName}' ({receivingFileSize} bytes) from user {UserId}");
+            Serilog.Log.Information("Started receiving file '{FileName}' ({FileSize} bytes) from user {UserId}", receivingFileName, receivingFileSize, UserId);
         }
 
         private string SanitizeFileName(string name)
@@ -146,7 +152,7 @@ namespace Moonshare.Server.WebSocketHandlers
             if (totalReceivedBytes != receivingFileSize)
             {
                 Send("FILE_FAILED: Size mismatch");
-                EventLogManager.LogError($"File size mismatch: expected {receivingFileSize}, received {totalReceivedBytes}");
+                Serilog.Log.Information("File size mismatch: expected {Expected} bytes, received {Received} bytes", receivingFileSize, totalReceivedBytes);
                 fileBuffer.Dispose();
                 ClearFileTransferState();
                 return;
@@ -157,22 +163,31 @@ namespace Moonshare.Server.WebSocketHandlers
             string path = Path.Combine(saveFolder, receivingFileName);
             File.WriteAllBytes(path, fileBuffer.ToArray());
 
-            EventLogManager.LogInfo($"File saved: {path}");
+            Serilog.Log.Information("File saved: {Path}", path);
 
-            var target = SessionManager.ConnectedPlayers.Values.FirstOrDefault(p => p.UserId == receivingTargetUser);
+            // Instanzübergreifend: globalen Zielspieler suchen
+            var target = SessionManager.ConnectedPlayers.Values
+                .FirstOrDefault(p => p.UserId == receivingTargetUser && p != this);
+
             if (target != null)
             {
-                var headerObj = new { type = "file_from", fromUserId = UserId, fileName = receivingFileName, fileSize = receivingFileSize };
+                var headerObj = new
+                {
+                    type = "file_from",
+                    fromUserId = UserId,
+                    fileName = receivingFileName,
+                    fileSize = receivingFileSize
+                };
                 var headerJson = JsonSerializer.Serialize(headerObj);
                 target.Send(headerJson);
                 target.Send(fileBuffer.ToArray());
                 Send("FILE_SENT");
-                EventLogManager.LogInfo($"File forwarded to {receivingTargetUser}");
+                Serilog.Log.Information("File forwarded to {TargetUser}", receivingTargetUser);
             }
             else
             {
                 Send("FILE_SENT_SERVER_ONLY");
-                EventLogManager.LogInfo($"Target user {receivingTargetUser} not connected, file saved on server only");
+                Serilog.Log.Information("Target user {TargetUser} not connected, file saved on server only", receivingTargetUser);
             }
 
             fileBuffer.Dispose();
@@ -191,7 +206,7 @@ namespace Moonshare.Server.WebSocketHandlers
         protected override void OnClose(CloseEventArgs e)
         {
             SessionManager.ConnectedPlayers.TryRemove(ID, out _);
-            EventLogManager.LogInfo("Connection closed for user " + UserId);
+            Serilog.Log.Information("Connection closed for user {UserId}", UserId);
         }
     }
 }
