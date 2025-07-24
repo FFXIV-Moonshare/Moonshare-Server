@@ -19,6 +19,7 @@ namespace Moonshare.Server.WebSocketHandlers
         private readonly WebSocketServer _wssv;
         private WebSocketSharp.WebSocket? _authServerSocket;
         private Timer? _sessionUpdateTimer;
+        private Timer? _serverInfoTimer; // Timer als Feld speichern, damit er nicht vom GC entfernt wird
         private readonly SemaphoreSlim _updateLock = new(1, 1);
         private readonly ConcurrentDictionary<string, AuthSession> _localSessions = new();
         private readonly string _instanceName;
@@ -26,7 +27,7 @@ namespace Moonshare.Server.WebSocketHandlers
         // Startzeit merken für Uptime
         private readonly DateTime _startTime;
 
-        // Neue WebSocket-Verbindung zum ApiGatewayServer
+       
         private WebSocketSharp.WebSocket? _gatewaySocket;
 
         public PlayerServerInstance(int instanceId, int totalInstances, string url, string instanceName)
@@ -57,6 +58,7 @@ namespace Moonshare.Server.WebSocketHandlers
         public void Stop()
         {
             _sessionUpdateTimer?.Dispose();
+            _serverInfoTimer?.Dispose();
             _authServerSocket?.Close();
             _gatewaySocket?.Close();
             _wssv.Stop();
@@ -177,7 +179,7 @@ namespace Moonshare.Server.WebSocketHandlers
             Log.Information("Instance {InstanceName}: Sent connection info to client.", _instanceName);
         }
 
-        // **NEU**: Aggregierte Serverinfo aus allen Shards holen
+       
         private static (int totalPlayers, int maxPlayers) GetServerInfoAggregated()
         {
             int totalPlayers = 0;
@@ -195,7 +197,7 @@ namespace Moonshare.Server.WebSocketHandlers
             return (totalPlayers, maxPlayers);
         }
 
-        // --- NEU: WebSocket-Verbindung zum ApiGatewayServer ---
+       
 
         private void ConnectToGateway()
         {
@@ -233,6 +235,9 @@ namespace Moonshare.Server.WebSocketHandlers
             var uptime = DateTime.UtcNow - _startTime;
             int uptimeSeconds = (int)uptime.TotalSeconds;
 
+            // Status "off" bis mindestens 1 Spieler verbunden ist
+            var status = _localSessions.Count > 0 ? "on" : "off";
+
             var data = new
             {
                 name = _instanceName,
@@ -240,21 +245,22 @@ namespace Moonshare.Server.WebSocketHandlers
                 total_players_online = totalPlayers,
                 max_players = maxPlayers,
                 server_version = "0.1",
-                uptime_seconds = uptimeSeconds
+                uptime_seconds = uptimeSeconds,
+                status = status
             };
 
             string jsonData = JsonSerializer.Serialize(data);
             string fullMessage = $"server_info:{jsonData}";
             _gatewaySocket.Send(fullMessage);
 
-            Log.Information("Instance {InstanceId}: ServerInfo sent to ApiGatewayServer. PlayersLocal={LocalPlayers} TotalPlayers={TotalPlayers} Uptime={UptimeSeconds}s",
-                _instanceId, _localSessions.Count, totalPlayers, uptimeSeconds);
+            Log.Information("Instance {InstanceId}: ServerInfo sent to ApiGatewayServer. PlayersLocal={LocalPlayers} TotalPlayers={TotalPlayers} Uptime={UptimeSeconds}s Status={Status}",
+                _instanceId, _localSessions.Count, totalPlayers, uptimeSeconds, status);
         }
 
-        // Startet regelmäßiges Senden des Serverstatus
+        
         private void StartPeriodicServerInfoUpdates()
         {
-            var timer = new System.Threading.Timer(_ =>
+            _serverInfoTimer = new Timer(_ =>
             {
                 SendServerInfoToGateway();
             }, null, TimeSpan.Zero, TimeSpan.FromSeconds(30));

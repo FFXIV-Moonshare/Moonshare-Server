@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using Moonshare.Server.Models;
+using Serilog;
 
 namespace Moonshare.Server.Managers
 {
@@ -14,13 +15,10 @@ namespace Moonshare.Server.Managers
 
     public static class SessionManager
     {
-        public static ConcurrentDictionary<string, AuthSession> Sessions = new();
+        public static bool SessionLoggingEnabled { get; set; } = true;
 
-       
-        private static ConcurrentDictionary<string, string> ClientAddressToToken = new();
-        // Key = ClientAddress, Value = SessionToken
-
-       
+        public static ConcurrentDictionary<string, AuthSession> Sessions { get; } = new();
+        private static ConcurrentDictionary<string, string> ClientAddressToToken { get; } = new();
         public static List<IActiveSessionProvider> ActiveSessionProviders { get; } = new();
 
         public static string GenerateSession(string userId, string clientAddress)
@@ -42,24 +40,22 @@ namespace Moonshare.Server.Managers
 
             Sessions[token] = newSession;
 
-            // Doppel-Session Check:
-            if (ClientAddressToToken.TryGetValue(clientAddress, out var oldToken))
+            if (ClientAddressToToken.TryGetValue(clientAddress, out var oldToken) && oldToken != token)
             {
-                if (oldToken != token)
+                if (Sessions.TryGetValue(oldToken, out var oldSession))
                 {
-                    // Alte Session als inaktiv markieren und entfernen
-                    if (Sessions.TryGetValue(oldToken, out var oldSession))
-                    {
-                        oldSession.IsActive = false;
-                        Sessions.TryRemove(oldToken, out _);
-                        Console.WriteLine($"[AuthServer] Removed old session {oldToken} for Client {clientAddress}");
-                    }
+                    oldSession.IsActive = false;
+                    Sessions.TryRemove(oldToken, out _);
+                    if (SessionLoggingEnabled)
+                        Log.Information("[AuthServer] Removed old session {OldToken} for Client {ClientAddress}", oldToken, clientAddress);
                 }
             }
 
             ClientAddressToToken[clientAddress] = token;
 
-            Console.WriteLine($"[AuthServer] Session created for {userId} with token {token} from {clientAddress}");
+            if (SessionLoggingEnabled)
+                Log.Information("[AuthServer] Session created for {UserId} with token {Token} from {ClientAddress}", userId, token, clientAddress);
+
             return token;
         }
 
@@ -69,13 +65,11 @@ namespace Moonshare.Server.Managers
             {
                 session.IsActive = false;
                 ClientAddressToToken.TryRemove(session.ClientAddress, out _);
-                Console.WriteLine($"[AuthServer] Marked session {token} inactive (UserId: {session.UserId})");
+                if (SessionLoggingEnabled)
+                    Log.Information("[AuthServer] Marked session {Token} inactive (UserId: {UserId})", token, session.UserId);
             }
         }
 
-        /// <summary>
-        /// Entfernt Sessions, die nicht aktiv sind UND nicht in PlayerServer/anderen Session-Providern mehr vorhanden sind
-        /// </summary>
         public static void CleanupInactiveSessions()
         {
             var activeTokensFromProviders = new HashSet<string>(
@@ -92,7 +86,8 @@ namespace Moonshare.Server.Managers
                 if (Sessions.TryRemove(token, out var session))
                 {
                     ClientAddressToToken.TryRemove(session.ClientAddress, out _);
-                    Console.WriteLine($"[AuthServer] Removed inactive session {token} (UserId: {session.UserId})");
+                    if (SessionLoggingEnabled)
+                        Log.Information("[AuthServer] Removed inactive session {Token} (UserId: {UserId})", token, session.UserId);
                 }
             }
         }
@@ -104,8 +99,12 @@ namespace Moonshare.Server.Managers
                 session.CreatedAt = DateTime.UtcNow;
                 session.IsActive = true;
                 CleanupInactiveSessions();
+                if (SessionLoggingEnabled)
+                    Log.Debug("[AuthServer] Refreshed session {Token} (UserId: {UserId})", token, session.UserId);
                 return true;
             }
+            if (SessionLoggingEnabled)
+                Log.Warning("[AuthServer] Attempted to refresh non-existent session {Token}", token);
             return false;
         }
 
@@ -114,7 +113,8 @@ namespace Moonshare.Server.Managers
             if (Sessions.TryRemove(token, out var session))
             {
                 ClientAddressToToken.TryRemove(session.ClientAddress, out _);
-                Console.WriteLine($"[AuthServer] Session {token} removed (UserId: {session.UserId})");
+                if (SessionLoggingEnabled)
+                    Log.Information("[AuthServer] Session {Token} removed (UserId: {UserId})", token, session.UserId);
             }
         }
 

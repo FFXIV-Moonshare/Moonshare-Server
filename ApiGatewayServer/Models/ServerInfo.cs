@@ -1,6 +1,7 @@
 ﻿using System.Text.Json.Serialization;
 
-
+namespace ApiGateway
+{
     public class ServerInfo
     {
         [JsonPropertyName("name")]
@@ -17,5 +18,8 @@
 
         [JsonPropertyName("uptime_seconds")]
         public int UptimeSeconds { get; set; }
-    }
 
+        [JsonPropertyName("is_online")]
+        public bool IsOnline { get; set; } = true;
+    }
+}

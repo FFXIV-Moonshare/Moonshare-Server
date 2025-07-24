@@ -13,7 +13,7 @@ namespace Moonshare.Server.WebSocket
             {
                 var json = SessionManager.GetSessionsJson();
                 Send(json);
-                Console.WriteLine("[AuthServer] Sessions sent via WebSocket");
+                Serilog.Log.Information("[AuthServer] Sessions sent via WebSocket");
             }
             else
             {
