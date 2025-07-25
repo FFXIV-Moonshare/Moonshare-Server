@@ -21,7 +21,7 @@ namespace Moonshare.Server.WebSocketHandlers
             "kick_inactive",
             "disconnect_all",
             "reload_sessions",
-            "send_message_to/USERID/MESSAGE",
+            //"send_message_to/USERID/MESSAGE",
             "list_userids",
             "find_user/USERID",
             "count_files",
@@ -29,7 +29,7 @@ namespace Moonshare.Server.WebSocketHandlers
             "server_info",
             "ping",
             "uptime",
-            "send_broadcast/MESSAGE",
+            //"send_broadcast/MESSAGE",
             "disconnect_user/USERID",
             "reload_config",
             "toggle_logging",
@@ -43,6 +43,8 @@ namespace Moonshare.Server.WebSocketHandlers
             "gc_collect",
             "version"
         };
+
+        private const int ShardCount = 3; // Muss zum System passen!
 
         public static void LogAvailableCommandsOnStartup()
         {
@@ -65,25 +67,20 @@ namespace Moonshare.Server.WebSocketHandlers
                 {
                     "kickall" => KickAll(),
                     "list_online" => ListOnline(),
-                    "session_count" => SessionManager.Sessions.Count.ToString(),
+                    "session_count" => SessionCount(),
                     "list_sessions" => ListSessions(),
                     "list_connected" => ListConnectedPlayers(),
-                    "kick_inactive" => KickInactive(),
-                    "disconnect_all" => DisconnectAll(),
-                    "reload_sessions" => ReloadSessions(),
-                    //"send_message_to" when parts.Length >= 3 => SendMessageTo(parts[1], parts[2]),  //todo
+
+                    //"send_message_to" when parts.Length >= 3 => SendMessageTo(parts[1], parts[2]),
                     "list_userids" => ListUserIds(),
-                    "find_user" when parts.Length >= 2 => FindUser(parts[1]),
-                    "count_files" => CountFiles(),
+              
                     "clear_sessions" => ClearSessions(),
                     "server_info" => ServerInfo(),
                     "ping" => "pong",
-                    "uptime" => Uptime(),
-                    //"send_broadcast" when parts.Length >= 2 => SendBroadcast(parts[1]), //todo
+              
+                    //"send_broadcast" when parts.Length >= 2 => SendBroadcast(parts[1]),
                     "disconnect_user" when parts.Length >= 2 => DisconnectUser(parts[1]),
-                    "reload_config" => ReloadConfig(),
-                    "toggle_logging" => ToggleLogging(),
-                    "list_commands" => ListCommands(),
+
                     "debug_sessions" => DebugSessions(),
                     "add_mock_user" when parts.Length >= 2 => AddMockUser(parts[1]),
                     "remove_mock_users" => RemoveMockUsers(),
@@ -105,10 +102,13 @@ namespace Moonshare.Server.WebSocketHandlers
         private static string KickAll()
         {
             int count = 0;
-            foreach (var p in SessionManager.ConnectedPlayers.Values)
+            foreach (var shardDict in SessionManager.ActivePlayers.Values)
             {
-                p.Context.WebSocket.Close();
-                count++;
+                foreach (var player in shardDict.Values)
+                {
+                    player.Context.WebSocket.Close();
+                    count++;
+                }
             }
             Log.Information("KickAll executed: {Count} players kicked", count);
             return $"{count} players kicked.";
@@ -116,61 +116,55 @@ namespace Moonshare.Server.WebSocketHandlers
 
         private static string ListOnline()
         {
-            var online = SessionManager.GetOnlinePlayers();
-            Log.Information("ListOnline executed: {Count} players online", online.Count);
-            return JsonSerializer.Serialize(online);
+            var allUsers = SessionManager.ActivePlayers.Values
+                .SelectMany(dict => dict.Values.Select(p => p.UserId))
+                .Distinct()
+                .ToList();
+
+            Log.Information("ListOnline executed: {Count} players online", allUsers.Count);
+            return JsonSerializer.Serialize(allUsers);
+        }
+
+        private static string SessionCount()
+        {
+            int totalSessions = SessionManager.ActiveSessions.Values.Sum(dict => dict.Count);
+            return totalSessions.ToString();
         }
 
         private static string ListSessions()
         {
-            List<AuthSession> sessions = SessionManager.Sessions.Values.ToList();
+            var sessions = SessionManager.ActiveSessions.Values.SelectMany(dict => dict.Values).ToList();
             Log.Information("ListSessions executed: {Count} sessions returned", sessions.Count);
             return JsonSerializer.Serialize(sessions);
         }
 
         private static string ListConnectedPlayers()
         {
-            var connected = SessionManager.ConnectedPlayers
-                .Select(kvp => new { SocketId = kvp.Key, kvp.Value.UserId })
+            var connected = SessionManager.ActivePlayers.Values
+                .SelectMany(dict => dict.Select(kvp => new { SocketId = kvp.Key, kvp.Value.UserId }))
                 .ToList();
             Log.Information("ListConnectedPlayers executed: {Count} players connected", connected.Count);
             return JsonSerializer.Serialize(connected);
         }
 
-        private static string KickInactive()
-        {
-            Log.Warning("KickInactive command called, but not implemented.");
-            return "KickInactive not yet implemented.";
-        }
-
-        private static string DisconnectAll()
-        {
-            int count = 0;
-            foreach (var player in SessionManager.ConnectedPlayers.Values)
-            {
-                player.Context.WebSocket.Close();
-                count++;
-            }
-            Log.Information("DisconnectAll executed: {Count} players disconnected", count);
-            return "All connected players have been disconnected.";
-        }
-
-        private static string ReloadSessions()
-        {
-            Log.Information("ReloadSessions executed.");
-            return "Sessions reloaded (placeholder).";
-        }
-
         private static string ListUserIds()
         {
-            var userIds = SessionManager.Sessions.Values.Select(s => s.UserId).Distinct().ToList();
+            var userIds = SessionManager.ActiveSessions.Values
+                .SelectMany(dict => dict.Values)
+                .Select(s => s.UserId)
+                .Distinct()
+                .ToList();
+
             Log.Information("ListUserIds executed: {Count} unique user IDs", userIds.Count);
             return JsonSerializer.Serialize(userIds);
         }
 
         private static string FindUser(string userId)
         {
-            var session = SessionManager.Sessions.Values.FirstOrDefault(s => s.UserId == userId);
+            var session = SessionManager.ActiveSessions.Values
+                .SelectMany(dict => dict.Values)
+                .FirstOrDefault(s => s.UserId == userId);
+
             if (session == null)
             {
                 Log.Information("FindUser: User {UserId} not found", userId);
@@ -180,23 +174,12 @@ namespace Moonshare.Server.WebSocketHandlers
             return JsonSerializer.Serialize(session);
         }
 
-        private static string CountFiles()
-        {
-            string folder = Path.Combine(AppContext.BaseDirectory, "ReceivedFiles");
-            if (!Directory.Exists(folder))
-            {
-                Log.Information("CountFiles executed: ReceivedFiles folder does not exist.");
-                return "No files received yet.";
-            }
-            int count = Directory.GetFiles(folder, "*", SearchOption.AllDirectories).Length;
-            Log.Information("CountFiles executed: {Count} files counted", count);
-            return count.ToString();
-        }
-
         private static string ClearSessions()
         {
-            int count = SessionManager.Sessions.Count;
-            SessionManager.Sessions.Clear();
+            int count = SessionManager.ActiveSessions.Values.Sum(dict => dict.Count);
+            foreach (var dict in SessionManager.ActiveSessions.Values)
+                dict.Clear();
+
             Log.Warning("ClearSessions executed: {Count} sessions cleared", count);
             return $"Cleared {count} sessions.";
         }
@@ -204,64 +187,49 @@ namespace Moonshare.Server.WebSocketHandlers
         private static string ServerInfo()
         {
             var uptime = (DateTime.UtcNow - System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds;
+            int connectedPlayers = SessionManager.ActivePlayers.Values.Sum(dict => dict.Count);
+            int totalSessions = SessionManager.ActiveSessions.Values.Sum(dict => dict.Count);
+
             var info = new
             {
                 ServerTime = DateTime.UtcNow,
                 UptimeSeconds = (int)uptime,
-                ConnectedPlayers = SessionManager.ConnectedPlayers.Count,
-                TotalSessions = SessionManager.Sessions.Count
+                ConnectedPlayers = connectedPlayers,
+                TotalSessions = totalSessions
             };
             Log.Information("ServerInfo requested");
             return JsonSerializer.Serialize(info);
         }
 
-        private static string Uptime()
-        {
-            var uptime = (DateTime.UtcNow - System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime());
-            Log.Information("Uptime requested: {Uptime}", uptime);
-            return uptime.ToString(@"dd\.hh\:mm\:ss");
-        }
-
         private static string DisconnectUser(string userId)
         {
-            var player = SessionManager.ConnectedPlayers.Values.FirstOrDefault(p => p.UserId == userId);
-            if (player == null)
+            foreach (var shardDict in SessionManager.ActivePlayers.Values)
             {
-                Log.Warning("DisconnectUser: User {UserId} not found", userId);
-                return $"User {userId} not found.";
+                var player = shardDict.Values.FirstOrDefault(p => p.UserId == userId);
+                if (player != null)
+                {
+                    player.Context.WebSocket.Close();
+                    Log.Information("DisconnectUser: User {UserId} disconnected", userId);
+                    return $"User {userId} disconnected.";
+                }
             }
-            player.Context.WebSocket.Close();
-            Log.Information("DisconnectUser: User {UserId} disconnected", userId);
-            return $"User {userId} disconnected.";
-        }
 
-        private static string ReloadConfig()
-        {
-            Log.Information("ReloadConfig called - no config system implemented.");
-            return "ReloadConfig not implemented.";
-        }
-
-        private static string ToggleLogging()
-        {
-            Log.Information("ToggleLogging called - no toggle implemented.");
-            return "ToggleLogging not implemented.";
-        }
-
-        private static string ListCommands()
-        {
-            Log.Information("ListCommands executed.");
-            return string.Join(", ", Commands);
+            Log.Warning("DisconnectUser: User {UserId} not found", userId);
+            return $"User {userId} not found.";
         }
 
         private static string DebugSessions()
         {
-            var debugInfo = SessionManager.Sessions.Select(kvp =>
-                new
-                {
-                    Token = kvp.Key,
-                    UserId = kvp.Value.UserId,
-                    CreatedAt = kvp.Value.CreatedAt,
-                }).ToList();
+            var debugInfo = SessionManager.ActiveSessions.Values
+                .SelectMany(dict => dict.Select(kvp =>
+                    new
+                    {
+                        Token = kvp.Key,
+                        UserId = kvp.Value.UserId,
+                        CreatedAt = kvp.Value.CreatedAt,
+                    }))
+                .ToList();
+
             Log.Information("DebugSessions executed, {Count} sessions", debugInfo.Count);
             return JsonSerializer.Serialize(debugInfo);
         }
@@ -275,24 +243,33 @@ namespace Moonshare.Server.WebSocketHandlers
                 SessionToken = token,
                 CreatedAt = DateTime.UtcNow
             };
-            SessionManager.Sessions[token] = session;
-            Log.Information("AddMockUser: Added mock user {UserId} with token {Token}", userId, token);
+            int shardId = GetStableHash(token) % ShardCount;
+            var shardSessions = SessionManager.ActiveSessions.GetOrAdd(shardId, _ => new System.Collections.Concurrent.ConcurrentDictionary<string, AuthSession>());
+            shardSessions[token] = session;
+
+            Log.Information("AddMockUser: Added mock user {UserId} with token {Token} in shard {ShardId}", userId, token, shardId);
             return $"Mock user {userId} added with token {token}.";
         }
 
         private static string RemoveMockUsers()
         {
-            var mockTokens = SessionManager.Sessions.Where(kvp => Guid.TryParse(kvp.Key, out _))
-                .Select(kvp => kvp.Key).ToList();
-            foreach (var token in mockTokens)
-                SessionManager.Sessions.TryRemove(token, out _);
-            Log.Information("RemoveMockUsers executed, removed {Count} mock sessions", mockTokens.Count);
-            return $"Removed {mockTokens.Count} mock users.";
+            int removedCount = 0;
+            foreach (var dict in SessionManager.ActiveSessions.Values)
+            {
+                var mockTokens = dict.Where(kvp => Guid.TryParse(kvp.Key, out _)).Select(kvp => kvp.Key).ToList();
+                foreach (var token in mockTokens)
+                {
+                    if (dict.TryRemove(token, out _))
+                        removedCount++;
+                }
+            }
+            Log.Information("RemoveMockUsers executed, removed {Count} mock sessions", removedCount);
+            return $"Removed {removedCount} mock users.";
         }
 
         private static string ExportSessions()
         {
-            var sessions = SessionManager.Sessions.Values.ToList();
+            var sessions = SessionManager.ActiveSessions.Values.SelectMany(dict => dict.Values).ToList();
             var json = JsonSerializer.Serialize(sessions);
             Log.Information("ExportSessions executed, exporting {Count} sessions", sessions.Count);
             return json;
@@ -300,9 +277,8 @@ namespace Moonshare.Server.WebSocketHandlers
 
         private static string StatsUsersPerShard()
         {
-            var shardCounts = SessionManager.Sessions.Values
-                .GroupBy(s => (GetStableHash(s.SessionToken) % 3))
-                .Select(g => new { Shard = g.Key, Count = g.Count() })
+            var shardCounts = SessionManager.ActiveSessions
+                .Select(kvp => new { Shard = kvp.Key, Count = kvp.Value.Count })
                 .ToList();
             Log.Information("StatsUsersPerShard executed");
             return JsonSerializer.Serialize(shardCounts);

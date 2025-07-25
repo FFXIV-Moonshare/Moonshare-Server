@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Timers;
@@ -14,12 +15,31 @@ namespace Moonshare.Server.Managers
         private static WebSocketSharp.WebSocket? _authServerSocket;
         private static Timer? _syncTimer;
 
-        // Vom AuthServer synchronisierte Sessions
-        public static Dictionary<string, AuthSession> SyncedSessions { get; private set; } = new();
+//        Default (falls nie Initialisiert): "ws://localhost:5004/sessions"
+//        private static string _authServerUrl = "ws://localhost:5004/sessions";
 
-        public static void StartSync()
+//        Später im Code, z.B. Start:
+//        PlayerSessionManager.Initialize(config.AuthServerWebSocketUrl, config.SessionUpdateIntervalSeconds* 1000);
+
+///       Jetzt ist _authServerUrl = config.AuthServerWebSocketUrl
+
+
+
+
+        private static string _authServerUrl = "ws://localhost:5004/sessions";
+
+        // Thread-safe Dictionary für Sessions
+        public static ConcurrentDictionary<string, AuthSession> SyncedSessions { get; private set; } = new();
+
+        public static void Initialize(string authServerUrl, int syncIntervalMs)
         {
-            _authServerSocket = new WebSocketSharp.WebSocket("ws://localhost:5004/sessions");
+            _authServerUrl = authServerUrl;
+            StartSync(syncIntervalMs);
+        }
+
+        private static void StartSync(int syncIntervalMs)
+        {
+            _authServerSocket = new WebSocketSharp.WebSocket(_authServerUrl);
 
             _authServerSocket.OnOpen += (_, _) =>
             {
@@ -34,7 +54,7 @@ namespace Moonshare.Server.Managers
                     var sessions = JsonSerializer.Deserialize<List<AuthSession>>(e.Data);
                     if (sessions != null)
                     {
-                        var updated = new Dictionary<string, AuthSession>();
+                        var updated = new ConcurrentDictionary<string, AuthSession>();
                         foreach (var session in sessions)
                             updated[session.SessionToken] = session;
 
@@ -67,7 +87,7 @@ namespace Moonshare.Server.Managers
                 Log.Error(ex, "[PlayerServer] Connection to AuthServer failed.");
             }
 
-            _syncTimer = new Timer(10000); // alle 10 Sekunden synchronisieren
+            _syncTimer = new Timer(syncIntervalMs);
             _syncTimer.Elapsed += (_, _) =>
             {
                 if (_authServerSocket?.IsAlive == true)

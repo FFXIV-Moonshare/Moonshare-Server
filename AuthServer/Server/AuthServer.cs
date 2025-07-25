@@ -28,21 +28,40 @@ namespace Moonshare.Server.Server
 
             try
             {
+                // Starte WebSocket-Server
                 _webSocketServer = new WebSocketServer(WebSocketUrl);
                 _webSocketServer.AddWebSocketService<AuthBehavior>("/auth");
                 _webSocketServer.AddWebSocketService<SessionQueryBehavior>("/sessions");
                 _webSocketServer.Start();
                 Log.Information("✅ WebSocket AuthServer läuft auf {Url}/auth und /sessions", WebSocketUrl);
 
+                // Starte HTTP Listener
                 _httpListener = new HttpListener();
                 _httpListener.Prefixes.Add(HttpUrl);
                 _httpListener.Start();
                 Log.Information("✅ HTTP AuthServer läuft auf {Url}", HttpUrl);
 
+                // Timer für Session Cleanup (alle 30 Sekunden)
                 _cleanupTimer = new System.Timers.Timer(30_000);
-                _cleanupTimer.Elapsed += (s, e) => SessionManager.CleanupInactiveSessions();
-                _cleanupTimer.Start();
+                _cleanupTimer.Elapsed += (_, _) =>
+                {
+                    try
+                    {
+                        SessionManager.CleanupInactiveSessions();
+                        Log.Debug("Session Cleanup erfolgreich ausgeführt");
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, "Fehler beim Ausführen des Session Cleanup");
+                    }
+                };
+                _cleanupTimer.AutoReset = true;
+                //_cleanupTimer.Start();
 
+
+                CreateManyTestSessions(1000);
+
+                // HTTP Listener asynchron laufen lassen
                 await ListenHttpAsync(_cts.Token);
             }
             catch (Exception ex)
@@ -50,21 +69,40 @@ namespace Moonshare.Server.Server
                 Log.Fatal(ex, "❌ Fehler beim Start des AuthServers");
             }
 
+            // Stoppe Server bei Beendigung
             await StopAsync();
+        }
+
+        private static void CreateManyTestSessions(int count)
+        {
+            Log.Information("Starte Erzeugung von {Count} Test-Sessions", count);
+            for (int i = 1; i <= count; i++)
+            {
+                string userId = $"testuser{i}";
+                string fakeClientIp = $"192.168.0.{i % 255}";
+                SessionManager.GenerateSession(userId, fakeClientIp);
+
+                if (i % 100 == 0)
+                    Log.Information("Erzeugte {Count} Sessions bisher", i);
+            }
+            Log.Information("Fertige Erzeugung von {Count} Test-Sessions", count);
         }
 
         private static async Task ListenHttpAsync(CancellationToken cancellationToken)
         {
             while (_httpListener?.IsListening == true && !cancellationToken.IsCancellationRequested)
             {
+                HttpListenerContext? ctx = null;
                 try
                 {
-                    var ctx = await _httpListener.GetContextAsync();
+                    ctx = await _httpListener.GetContextAsync();
+                    // Starte die Verarbeitung parallel, damit Listener nicht blockiert
                     _ = Task.Run(() => ProcessHttpRequestAsync(ctx), cancellationToken);
                 }
                 catch (HttpListenerException)
                 {
-                    break; // normal on shutdown
+                    // Erwarteter Shutdown - abbrechen
+                    break;
                 }
                 catch (Exception ex)
                 {
@@ -83,7 +121,7 @@ namespace Moonshare.Server.Server
                 if (req.HttpMethod != "GET")
                 {
                     res.StatusCode = 405;
-                    Log.Warning("[HTTP] Methode nicht erlaubt: {Method}", req.HttpMethod);
+                    Log.Warning("[HTTP] Methode nicht erlaubt: {Method} von {IP}", req.HttpMethod, req.RemoteEndPoint?.Address);
                     return;
                 }
 
@@ -113,11 +151,11 @@ namespace Moonshare.Server.Server
             catch (Exception ex)
             {
                 Log.Error(ex, "[HTTP] Fehler beim Verarbeiten der Anfrage");
-                res.StatusCode = 500;
+                try { res.StatusCode = 500; } catch { }
             }
             finally
             {
-                res.Close();
+                try { res.Close(); } catch { }
             }
         }
 
@@ -127,9 +165,12 @@ namespace Moonshare.Server.Server
             {
                 _cts?.Cancel();
 
-                _cleanupTimer?.Stop();
-                _cleanupTimer?.Dispose();
-                _cleanupTimer = null;
+                if (_cleanupTimer != null)
+                {
+                    _cleanupTimer.Stop();
+                    _cleanupTimer.Dispose();
+                    _cleanupTimer = null;
+                }
 
                 if (_httpListener?.IsListening == true)
                 {
@@ -138,8 +179,11 @@ namespace Moonshare.Server.Server
                 _httpListener?.Close();
                 _httpListener = null;
 
-                _webSocketServer?.Stop();
-                _webSocketServer = null;
+                if (_webSocketServer != null)
+                {
+                    _webSocketServer.Stop();
+                    _webSocketServer = null;
+                }
 
                 Log.Information("🛑 AuthServer wurde gestoppt.");
             }

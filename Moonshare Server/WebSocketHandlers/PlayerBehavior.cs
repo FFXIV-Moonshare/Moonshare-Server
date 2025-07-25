@@ -1,4 +1,9 @@
 ﻿using Moonshare.Server.Managers;
+using Serilog;
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Linq;
 using System.Text.Json;
 using WebSocketSharp;
 using WebSocketSharp.Server;
@@ -8,6 +13,9 @@ namespace Moonshare.Server.WebSocketHandlers
     public class PlayerBehavior : WebSocketBehavior
     {
         public string UserId { get; private set; } = string.Empty;
+        public string ID => IDInternal ?? ""; // ConnectionId
+        private string? IDInternal;
+
         private static readonly string ReceivedFilesFolder = Path.Combine(AppContext.BaseDirectory, "ReceivedFiles");
 
         private MemoryStream? fileBuffer;
@@ -17,16 +25,19 @@ namespace Moonshare.Server.WebSocketHandlers
         private long totalReceivedBytes;
 
         private readonly PlayerServerInstance _serverInstance;
-        
+        private readonly int _shardId;
+        private bool _isConnected = false;
 
-        public PlayerBehavior(PlayerServerInstance instance)
+        public PlayerBehavior(PlayerServerInstance instance, int shardId)
         {
             _serverInstance = instance;
+            _shardId = shardId;
         }
 
         protected override void OnOpen()
         {
-            Serilog.Log.Information("New WebSocket connection from {EndPoint}", Context.UserEndPoint);
+            IDInternal = ID; // WebSocket-Verbindungs-ID setzen
+            Serilog.Log.Information("New WebSocket connection from {EndPoint} on shard {ShardId}", Context.UserEndPoint, _shardId);
             if (!Directory.Exists(ReceivedFilesFolder))
                 Directory.CreateDirectory(ReceivedFilesFolder);
         }
@@ -42,7 +53,7 @@ namespace Moonshare.Server.WebSocketHandlers
                 }
                 else
                 {
-                    Serilog.Log.Error("Received binary data but no file transfer active.");
+                    Log.Error("Received binary data but no file transfer active.");
                 }
                 return;
             }
@@ -73,7 +84,7 @@ namespace Moonshare.Server.WebSocketHandlers
                 }
                 catch (JsonException)
                 {
-                    Serilog.Log.Error("Failed to parse JSON message.");
+                    Log.Error("Failed to parse JSON message.");
                 }
             }
             else
@@ -86,30 +97,45 @@ namespace Moonshare.Server.WebSocketHandlers
         {
             if (!root.TryGetProperty("token", out var tokenElem))
             {
-                Send("SESSION_INVALID");
+                Send(JsonSerializer.Serialize(new { type = "session_auth_result", success = false, message = "Missing token" }));
                 Context.WebSocket.Close();
                 return;
             }
 
             var token = tokenElem.GetString() ?? "";
-            if (SessionManager.ValidateSession(token, out var session))
+
+            if (_serverInstance.SessionExists(token) && SessionManager.ValidateSession(token, out var session))
             {
                 UserId = session.UserId;
-                SessionManager.ConnectedPlayers[ID] = this;
-                Send($"SESSION_OK:{UserId}");
-                Serilog.Log.Information("{UserId} connected with valid session", UserId);
+
+                // Spieler hinzufügen über SessionManager (inkl. Warteschlange etc)
+                bool accepted = SessionManager.AddConnectedPlayer(_shardId, ID, this);
+                if (!accepted)
+                {
+                    Send(JsonSerializer.Serialize(new { type = "session_auth_result", success = false, message = "Server full, please try later" }));
+                    Context.WebSocket.Close(CloseStatusCode.PolicyViolation, "Server full, please try later.");
+                    Serilog.Log.Information("Rejected {UserId} due to max player limit on shard {ShardId}", UserId, _shardId);
+                    return;
+                }
+
+                _isConnected = true;
+
+                Send(JsonSerializer.Serialize(new { type = "session_auth_result", success = true, message = "Authentication successful", userId = UserId }));
+
+                Serilog.Log.Information("{UserId} connected with valid session on shard {ShardId}", UserId, _shardId);
                 _serverInstance.SendInstanceInfoToClient(Context.WebSocket);
             }
             else
             {
-                Send("SESSION_INVALID");
+                Send(JsonSerializer.Serialize(new { type = "session_auth_result", success = false, message = "Invalid session token" }));
+                Serilog.Log.Warning("Invalid session token received, closing connection.");
                 Context.WebSocket.Close();
             }
         }
 
         private void SendOnlineList()
         {
-            var online = SessionManager.GetOnlinePlayers();
+            var online = SessionManager.GetOnlinePlayers(_shardId);
             var json = JsonSerializer.Serialize(online);
             Send("ONLINE:" + json);
         }
@@ -131,7 +157,7 @@ namespace Moonshare.Server.WebSocketHandlers
             fileBuffer = new MemoryStream();
 
             Send("file_receive_ready");
-            Serilog.Log.Information("Started receiving file '{FileName}' ({FileSize} bytes) from user {UserId}", receivingFileName, receivingFileSize, UserId);
+            Serilog.Log.Information("Started receiving file '{FileName}' ({FileSize} bytes) from user {UserId} on shard {ShardId}", receivingFileName, receivingFileSize, UserId, _shardId);
         }
 
         private string SanitizeFileName(string name)
@@ -165,29 +191,35 @@ namespace Moonshare.Server.WebSocketHandlers
 
             Serilog.Log.Information("File saved: {Path}", path);
 
-            // Instanzübergreifend: globalen Zielspieler suchen
-            var target = SessionManager.ConnectedPlayers.Values
-                .FirstOrDefault(p => p.UserId == receivingTargetUser && p != this);
-
-            if (target != null)
+            // Zielnutzer im selben Shard aus SessionManager.ActivePlayers ermitteln
+            if (SessionManager.ActivePlayers.TryGetValue(_shardId, out var connected))
             {
-                var headerObj = new
+                var target = connected.Values.FirstOrDefault(p => p.UserId == receivingTargetUser && p != this);
+                if (target != null)
                 {
-                    type = "file_from",
-                    fromUserId = UserId,
-                    fileName = receivingFileName,
-                    fileSize = receivingFileSize
-                };
-                var headerJson = JsonSerializer.Serialize(headerObj);
-                target.Send(headerJson);
-                target.Send(fileBuffer.ToArray());
-                Send("FILE_SENT");
-                Serilog.Log.Information("File forwarded to {TargetUser}", receivingTargetUser);
+                    var headerObj = new
+                    {
+                        type = "file_from",
+                        fromUserId = UserId,
+                        fileName = receivingFileName,
+                        fileSize = receivingFileSize
+                    };
+                    var headerJson = JsonSerializer.Serialize(headerObj);
+                    target.Send(headerJson);
+                    target.Send(fileBuffer.ToArray());
+                    Send("FILE_SENT");
+                    Serilog.Log.Information("File forwarded to {TargetUser} on shard {ShardId}", receivingTargetUser, _shardId);
+                }
+                else
+                {
+                    Send("FILE_SENT_SERVER_ONLY");
+                    Serilog.Log.Information("Target user {TargetUser} not connected on shard {ShardId}, file saved on server only", receivingTargetUser, _shardId);
+                }
             }
             else
             {
                 Send("FILE_SENT_SERVER_ONLY");
-                Serilog.Log.Information("Target user {TargetUser} not connected, file saved on server only", receivingTargetUser);
+                Serilog.Log.Information("No connected players found on shard {ShardId}", _shardId);
             }
 
             fileBuffer.Dispose();
@@ -205,8 +237,12 @@ namespace Moonshare.Server.WebSocketHandlers
 
         protected override void OnClose(CloseEventArgs e)
         {
-            SessionManager.ConnectedPlayers.TryRemove(ID, out _);
-            Serilog.Log.Information("Connection closed for user {UserId}", UserId);
+            if (_isConnected)
+            {
+                SessionManager.RemoveConnectedPlayer(_shardId, ID);
+                _serverInstance.RemovePlayer(ID, UserId);
+            }
+            Serilog.Log.Information("Connection closed for user {UserId} on shard {ShardId}", UserId, _shardId);
         }
     }
 }
